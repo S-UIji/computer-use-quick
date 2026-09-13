@@ -8,7 +8,17 @@ const pagesDir = join(here, "pages");
 
 export async function startFixtureServer(port = 0) {
   const server = createServer(async (req, res) => {
-    const name = normalize(decodeURIComponent((req.url ?? "/").split("?")[0])).replace(/^([/\\])+/, "");
+    const path = (req.url ?? "/").split("?")[0];
+
+    // 慢接口：用来验证隐式等待能靠网络在途信号等到异步结果
+    if (path === "/api/orders") {
+      await new Promise((r) => setTimeout(r, 800));
+      res.writeHead(200, { "content-type": "application/json" })
+         .end(JSON.stringify(["ORD20260911", "ORD20260912"]));
+      return;
+    }
+
+    const name = normalize(decodeURIComponent(path)).replace(/^([/\\])+/, "");
     if (!name.endsWith(".html") || name.includes("..")) {
       res.writeHead(404).end("not found");
       return;
