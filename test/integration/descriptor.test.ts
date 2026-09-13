@@ -1,18 +1,16 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import puppeteer, { type Browser } from "puppeteer";
+import { describe, it, expect, beforeAll, afterAll, inject } from "vitest";
 import { BrowserSession, type PageHandle } from "../../src/session/browser.js";
-import { startFixtureServer } from "../fixtures/server.js";
 import { takeSnapshot } from "../../src/perception/snapshot.js";
 import { buildDescriptor } from "../../src/locator/descriptor.js";
 
-let chrome: Browser, session: BrowserSession, fx: Awaited<ReturnType<typeof startFixtureServer>>;
+let session: BrowserSession;
+const fx = { url: "" };
 
 beforeAll(async () => {
-  fx = await startFixtureServer();
-  chrome = await puppeteer.launch({ headless: true, args: ["--remote-debugging-port=9337", "--no-sandbox"] });
-  session = await BrowserSession.connect("http://127.0.0.1:9337");
+  fx.url = inject("fixtureURL");
+  session = await BrowserSession.connect(inject("browserURL"));
 });
-afterAll(async () => { await session?.close(); await chrome?.close(); await fx?.close(); });
+afterAll(async () => { await session?.close(); });
 
 async function open(path: string): Promise<PageHandle> {
   const h = await session.getPage();

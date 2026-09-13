@@ -1,17 +1,15 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import puppeteer, { type Browser } from "puppeteer";
+import { describe, it, expect, beforeAll, afterAll, inject } from "vitest";
 import { BrowserSession } from "../../src/session/browser.js";
-import { startFixtureServer } from "../fixtures/server.js";
 import { DiagnosticsCollector } from "../../src/diagnostics/collector.js";
 
-let chrome: Browser, session: BrowserSession, fx: Awaited<ReturnType<typeof startFixtureServer>>;
+let session: BrowserSession;
+const fx = { url: "" };
 
 beforeAll(async () => {
-  fx = await startFixtureServer();
-  chrome = await puppeteer.launch({ headless: true, args: ["--remote-debugging-port=9339", "--no-sandbox"] });
-  session = await BrowserSession.connect("http://127.0.0.1:9339");
+  fx.url = inject("fixtureURL");
+  session = await BrowserSession.connect(inject("browserURL"));
 });
-afterAll(async () => { await session?.close(); await chrome?.close(); await fx?.close(); });
+afterAll(async () => { await session?.close(); });
 
 describe("DiagnosticsCollector", () => {
   it("采集 console.error", async () => {

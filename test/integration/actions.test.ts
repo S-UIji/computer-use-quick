@@ -1,21 +1,19 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import puppeteer, { type Browser } from "puppeteer";
+import { describe, it, expect, beforeAll, afterAll, inject } from "vitest";
 import { BrowserSession, type PageHandle } from "../../src/session/browser.js";
-import { startFixtureServer } from "../fixtures/server.js";
 import { NetworkTracker } from "../../src/waiter/stability.js";
 import { runAction, type ActionContext } from "../../src/executor/actions.js";
 import type { Descriptor } from "../../src/types.js";
 
-let chrome: Browser, session: BrowserSession, fx: Awaited<ReturnType<typeof startFixtureServer>>;
+let session: BrowserSession;
+const fx = { url: "" };
 let tracker: NetworkTracker;
 
 beforeAll(async () => {
-  fx = await startFixtureServer();
-  chrome = await puppeteer.launch({ headless: true, args: ["--remote-debugging-port=9341", "--no-sandbox"] });
-  session = await BrowserSession.connect("http://127.0.0.1:9341");
+  fx.url = inject("fixtureURL");
+  session = await BrowserSession.connect(inject("browserURL"));
   tracker = await NetworkTracker.attach(await session.getPage());
 });
-afterAll(async () => { await session?.close(); await chrome?.close(); await fx?.close(); });
+afterAll(async () => { await session?.close(); });
 
 const css = (value: string): { descriptor: Descriptor } => ({
   descriptor: { strategies: [{ kind: "css", value }], framePath: [] }

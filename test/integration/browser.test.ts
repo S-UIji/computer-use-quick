@@ -1,21 +1,14 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import puppeteer, { type Browser } from "puppeteer";
+import { describe, it, expect, beforeAll, afterAll, inject } from "vitest";
 import { BrowserSession } from "../../src/session/browser.js";
 
-let chrome: Browser;
 let session: BrowserSession;
 
 beforeAll(async () => {
-  chrome = await puppeteer.launch({
-    headless: true,
-    args: ["--remote-debugging-port=9333", "--no-sandbox"]
-  });
-  session = await BrowserSession.connect("http://127.0.0.1:9333");
+  session = await BrowserSession.connect(inject("browserURL"));
 });
 
 afterAll(async () => {
   await session?.close();
-  await chrome?.close();
 });
 
 describe("BrowserSession", () => {

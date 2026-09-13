@@ -37,8 +37,12 @@ export async function startFixtureServer(port = 0) {
 
   return {
     url: `http://127.0.0.1:${actualPort}`,
-    close: () => new Promise<void>((resolve, reject) =>
-      server.close((err) => (err ? reject(err) : resolve()))
-    )
+    close: () =>
+      new Promise<void>((resolve) => {
+        // 不能只 server.close()：它会等所有连接排空，而浏览器（尤其是被强杀的）
+        // 留下的 keep-alive socket 不会自己断，收尾会一直挂着。
+        server.closeAllConnections();
+        server.close(() => resolve());
+      })
   };
 }
