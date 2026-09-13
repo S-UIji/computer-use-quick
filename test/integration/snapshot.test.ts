@@ -47,6 +47,14 @@ describe("takeSnapshot", () => {
     expect(snap.text).not.toContain("group ");  // 且没有把它们分组的容器节点
   });
 
+  it("空白页返回空快照而非抛错（尚未导航是合法状态）", async () => {
+    const h = await session.getPage();
+    await h.page.goto("about:blank", { waitUntil: "load" });
+    const snap = await takeSnapshot(h);
+    expect(snap.text).toBe("");
+    expect(snap.refs.size).toBe(0);
+  });
+
   it("快照文本比同页截图省 token（用字符数近似）", async () => {
     const snap = await takeSnapshot(await open("homo-list.html"));
     expect(snap.text.length).toBeLessThan(2000);

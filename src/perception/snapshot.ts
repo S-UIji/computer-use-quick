@@ -1,5 +1,6 @@
 import type { PageHandle } from "../session/browser.js";
-import type { SnapshotResult } from "../types.js";
+import type { PrunedNode, SnapshotResult } from "../types.js";
+import { listFrames } from "../session/frames.js";
 import { fetchAxTree, buildTree } from "./axtree.js";
 import { prune } from "./prune.js";
 import { collapse } from "./collapse.js";
@@ -14,14 +15,33 @@ export async function takeSnapshot(
   handle: PageHandle,
   opts: SnapshotOptions = {}
 ): Promise<SnapshotResult> {
-  const raw = await fetchAxTree(handle.cdp);
-  const root = buildTree(raw);
-  if (!root) throw new Error("a11y 树为空，页面可能尚未加载");
+  const frames = await listFrames(handle);
+  const mainFrameId = frames[0]?.frameId;
 
-  const pruned = prune(raw, root.nodeId);
-  if (!pruned) throw new Error("裁剪后无可用节点");
+  let rawTotal = 0;
+  const merged: PrunedNode = { role: "RootWebArea", name: "", props: {}, children: [] };
 
-  const collapsed = collapse(pruned, { threshold: opts.threshold, expand: opts.expand });
+  for (const f of frames) {
+    const raw = await fetchAxTree(handle.cdp, f.frameId);
+    rawTotal += raw.length;
+
+    const root = buildTree(raw);
+    if (!root) continue;
+    const pruned = prune(raw, root.nodeId);
+    if (!pruned) continue;
+
+    if (f.frameId === mainFrameId) {
+      merged.children.push(...pruned.children);
+    } else {
+      // 子 frame 的内容包一层，让模型看得到归属
+      merged.children.push({
+        role: "iframe", name: f.key, props: { frame: f.key }, children: pruned.children
+      });
+    }
+  }
+
+  // 空白页（about:blank、尚未导航）是合法状态，不是错误——返回空快照即可
+  const collapsed = collapse(merged, { threshold: opts.threshold, expand: opts.expand });
   const { text, refs } = render(collapsed);
 
   let prunedCount = 0;
@@ -37,6 +57,6 @@ export async function takeSnapshot(
   return {
     text,
     refs,
-    stats: { rawNodes: raw.length, prunedNodes: prunedCount, collapsedGroups: groupCount }
+    stats: { rawNodes: rawTotal, prunedNodes: prunedCount, collapsedGroups: groupCount }
   };
 }

@@ -1,6 +1,7 @@
 import type { PageHandle } from "../session/browser.js";
 import type { Descriptor, Strategy } from "../types.js";
 import { findAnchor } from "./container.js";
+import { framePathOf } from "../session/frames.js";
 
 interface DomInfo {
   tag: string;
@@ -75,10 +76,11 @@ export async function buildDescriptor(
   handle: PageHandle,
   backendNodeId: number
 ): Promise<Descriptor> {
-  const [info, ax, anchor] = await Promise.all([
+  const [info, ax, anchor, framePath] = await Promise.all([
     domInfo(handle, backendNodeId),
     axOf(handle, backendNodeId),
-    findAnchor(handle, backendNodeId)
+    findAnchor(handle, backendNodeId),
+    framePathOf(handle, backendNodeId)
   ]);
 
   const strategies: Strategy[] = [];
@@ -98,5 +100,5 @@ export async function buildDescriptor(
   strategies.push({ kind: "css", value: cssOf(info) });
   strategies.push({ kind: "xpath", value: info.xpath });
 
-  return { strategies, framePath: [], distinguishers: anchor?.distinguishers };
+  return { strategies, framePath, distinguishers: anchor?.distinguishers };
 }

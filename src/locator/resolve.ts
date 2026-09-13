@@ -1,6 +1,7 @@
 import type { PageHandle } from "../session/browser.js";
 import type { Descriptor, ResolveResult, Strategy, TargetRef } from "../types.js";
 import { markAncestors, clearMarks } from "./container.js";
+import { scopeNodeId } from "../session/frames.js";
 
 export class LocatorError extends Error {
   constructor(
@@ -11,13 +12,6 @@ export class LocatorError extends Error {
     super(message);
     this.name = "LocatorError";
   }
-}
-
-async function documentNodeId(handle: PageHandle): Promise<number> {
-  const { root } = (await handle.cdp.send("DOM.getDocument", { depth: 0 })) as {
-    root: { nodeId: number };
-  };
-  return root.nodeId;
 }
 
 async function backendIdOfNodeId(handle: PageHandle, nodeId: number): Promise<number> {
@@ -171,7 +165,7 @@ async function tryStrategy(
 }
 
 export async function resolve(handle: PageHandle, d: Descriptor): Promise<ResolveResult> {
-  const scope = await documentNodeId(handle);
+  const scope = await scopeNodeId(handle, d.framePath);
   const tried: string[] = [];
 
   for (let i = 0; i < d.strategies.length; i++) {

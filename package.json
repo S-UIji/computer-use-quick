@@ -2,12 +2,15 @@
   "name": "computer-use-quick",
   "version": "0.1.0",
   "type": "module",
-  "bin": { "computer-use-quick": "./dist/index.js" },
+  "bin": {
+    "computer-use-quick": "./dist/index.js"
+  },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
     "test:unit": "vitest run test/unit",
-    "test:integration": "vitest run test/integration"
+    "test:integration": "vitest run test/integration",
+    "bench": "node --experimental-strip-types test/bench/cli.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

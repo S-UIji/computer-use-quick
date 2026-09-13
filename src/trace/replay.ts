@@ -15,7 +15,7 @@ export interface ReplayOptions {
 }
 
 /** 把 trace 里的相对 url 补全成绝对地址 */
-function absolutize(step: Step, baseUrl: string): Step {
+export function absolutize(step: Step, baseUrl: string): Step {
   if (step.action !== "navigate") return step;
   if (/^https?:\/\//i.test(step.url)) return step;
   const base = baseUrl.replace(/\/$/, "");

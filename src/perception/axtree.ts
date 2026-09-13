@@ -1,8 +1,11 @@
 import type { CDPSession } from "puppeteer-core";
 import type { RawAxNode } from "../types.js";
 
-export async function fetchAxTree(cdp: CDPSession): Promise<RawAxNode[]> {
-  const { nodes } = (await cdp.send("Accessibility.getFullAXTree")) as { nodes: RawAxNode[] };
+export async function fetchAxTree(cdp: CDPSession, frameId?: string): Promise<RawAxNode[]> {
+  const { nodes } = (await cdp.send(
+    "Accessibility.getFullAXTree",
+    frameId ? { frameId } : {}
+  )) as { nodes: RawAxNode[] };
   return nodes;
 }
 
