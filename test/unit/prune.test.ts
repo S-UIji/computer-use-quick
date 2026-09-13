@@ -106,6 +106,30 @@ describe("prune", () => {
     expect(st.children).toHaveLength(0);
   });
 
+  it("丢弃名字完全来自唯一子节点的包装容器（td 继承 button 的名字）", () => {
+    const wrapper: RawAxNode[] = [
+      node({ nodeId: "1", role: { value: "RootWebArea" }, name: { value: "表" }, childIds: ["2"] }),
+      node({ nodeId: "2", role: { value: "cell" }, name: { value: "删除" }, childIds: ["3"] }),
+      node({ nodeId: "3", role: { value: "button" }, name: { value: "删除" }, backendDOMNodeId: 5 })
+    ];
+    const out = prune(wrapper, "1")!;
+    expect(out.children).toHaveLength(1);
+    expect((out.children[0] as PrunedNode).role).toBe("button");
+  });
+
+  it("名字与子节点不同的容器要留下（cell 承载行数据）", () => {
+    const dataCell: RawAxNode[] = [
+      node({ nodeId: "1", role: { value: "RootWebArea" }, name: { value: "表" }, childIds: ["2"] }),
+      node({ nodeId: "2", role: { value: "cell" }, name: { value: "ORD20260911" }, childIds: ["3"] }),
+      node({ nodeId: "3", role: { value: "StaticText" }, name: { value: "ORD20260911" } })
+    ];
+    const out = prune(dataCell, "1")!;
+    expect(out.children).toHaveLength(1);
+    const cell = out.children[0] as PrunedNode;
+    expect(cell.role).toBe("cell");
+    expect(cell.children).toHaveLength(0); // 内部 StaticText 冗余，已丢
+  });
+
   it("保留有 name 的容器节点，即使它本身不可交互", () => {
     const withNamed = [
       node({ nodeId: "1", role: { value: "RootWebArea" }, childIds: ["2"] }),

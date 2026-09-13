@@ -70,6 +70,16 @@ export function prune(
     const children = (n.childIds ?? []).flatMap((c) => walk(c, keep ? name : ancestorName));
 
     if (!keep) return children;
+
+    // 仅仅因为"有名字"才被留下的包装容器，如果名字完全来自它唯一的那个子节点，
+    // 就是纯重复（<td><button>删除</button></td> 会产生 cell "删除" + button "删除"）。
+    // 交互节点和语义文本节点不适用——它们本身就有价值。
+    const keptByNameOnly =
+      !INTERACTIVE_ROLES.has(role) && !SEMANTIC_TEXT_ROLES.has(role) && !TEXT_ROLES.has(role);
+    if (keptByNameOnly && children.length === 1 && children[0].name === name) {
+      return children;
+    }
+
     return [{ role, name, props: collectProps(n), backendNodeId: n.backendDOMNodeId, children }];
   }
 
