@@ -5138,21 +5138,25 @@ export async function listFrames(handle: PageHandle): Promise<FrameInfo[]> {
   };
 
   const docByFrame = new Map<string, number>();
+  // 主文档就是 pierce 树的根
+  if (flat[0]) docByFrame.set(flat[0].frameId, root.nodeId);
+
+  // 实测（Chrome 148）：contentDocument 上【没有】frameId，只有 nodeId/documentURL；
+  // 带 frameId 的是它的宿主 <iframe> 元素节点。所以从宿主取 frameId、从它的
+  // contentDocument 取 nodeId，两边配对。
   const collect = (node: unknown): void => {
     const n = node as {
-      nodeId: number; nodeName?: string; frameId?: string;
-      contentDocument?: { nodeId: number; frameId?: string };
+      frameId?: string;
+      contentDocument?: { nodeId: number };
       children?: unknown[];
     };
-    if (n.nodeName === "#document" && n.frameId) docByFrame.set(n.frameId, n.nodeId);
-    if (n.contentDocument?.frameId) {
-      docByFrame.set(n.contentDocument.frameId, n.contentDocument.nodeId);
+    if (n.frameId && n.contentDocument) {
+      docByFrame.set(n.frameId, n.contentDocument.nodeId);
       collect(n.contentDocument);
     }
     for (const c of n.children ?? []) collect(c);
   };
   collect(root);
-  if (root.frameId) docByFrame.set(root.frameId, root.nodeId);
 
   return flat
     .filter((f) => docByFrame.has(f.frameId))
