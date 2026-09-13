@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>表单</title></head>
+<body>
+  <main>
+    <h1>用户登录</h1>
+    <form id="login-form">
+      <label for="user">用户名</label>
+      <input id="user" name="user" type="text">
+      <label for="pwd">密码</label>
+      <input id="pwd" name="pwd" type="password">
+      <label for="region">地区</label>
+      <select id="region">
+        <option value="bj">北京</option>
+        <option value="hf">合肥</option>
+      </select>
+      <label><input id="remember" type="checkbox"> 记住我</label>
+      <button type="button" id="submit">登录</button>
+    </form>
+    <p id="result"></p>
+  </main>
+  <script>
+    document.getElementById("submit").addEventListener("click", () => {
+      const u = document.getElementById("user").value;
+      document.getElementById("result").textContent = u ? `欢迎 ${u}` : "请输入用户名";
+    });
+  </script>
+</body></html>

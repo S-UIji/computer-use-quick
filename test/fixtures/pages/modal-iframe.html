@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>弹窗与 iframe</title></head>
+<body>
+  <main>
+    <h1>设置</h1>
+    <button type="button" id="open">打开弹窗</button>
+    <div id="modal" role="dialog" aria-label="新增订单" hidden>
+      <label for="cust">客户名称</label>
+      <input id="cust" type="text">
+      <button type="button" id="save">保存</button>
+    </div>
+    <iframe id="inner" src="/iframe-inner.html" title="内嵌表单" width="400" height="200"></iframe>
+  </main>
+  <script>
+    document.getElementById("open").addEventListener("click", () => {
+      document.getElementById("modal").hidden = false;
+    });
+  </script>
+</body></html>

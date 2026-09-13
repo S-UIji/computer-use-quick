@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>异步列表</title></head>
+<body>
+  <main>
+    <h1>订单列表</h1>
+    <button type="button" id="load">加载数据</button>
+    <ul id="list"><li>尚未加载</li></ul>
+  </main>
+  <script>
+    document.getElementById("load").addEventListener("click", () => {
+      const list = document.getElementById("list");
+      list.innerHTML = "<li>加载中…</li>";
+      // 800ms 后才出结果：固定 sleep 300ms 会漏，隐式等待应该等到
+      setTimeout(() => {
+        list.innerHTML = "<li>ORD20260911</li><li>ORD20260912</li>";
+      }, 800);
+    });
+  </script>
+</body></html>

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>部门卡片墙</title></head>
+<body>
+  <main>
+    <h1>组织一览</h1>
+    <div id="wall">
+      <div class="card">
+        <div class="title">教育事业群</div>
+        <button type="button">查看在岗干部明细</button>
+        <button type="button">负责人治理</button>
+        <span>总人数 5081 人</span>
+      </div>
+      <div class="card">
+        <div class="title">技术平台中心</div>
+        <button type="button">查看在岗干部明细</button>
+        <button type="button">负责人治理</button>
+        <span>总人数 0 人</span>
+      </div>
+      <div class="card">
+        <div class="title">人力资源中心</div>
+        <button type="button">查看在岗干部明细</button>
+        <button type="button">负责人治理</button>
+        <span>总人数 0 人</span>
+      </div>
+    </div>
+    <p id="clicked">未点击</p>
+  </main>
+  <script>
+    document.querySelectorAll(".card button").forEach((b) => {
+      b.addEventListener("click", (e) => {
+        const card = e.target.closest(".card");
+        const name = card.querySelector(".title").textContent;
+        document.getElementById("clicked").textContent = `${name} · ${e.target.textContent}`;
+      });
+    });
+  </script>
+</body></html>
