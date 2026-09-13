@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { BrowserSession } from "./session/browser.js";
 import { takeSnapshot } from "./perception/snapshot.js";
+import { DiagnosticsCollector } from "./diagnostics/collector.js";
 
 /** 最近一次 snapshot 的 ref 表，按 pageId 保存，供 batch 用 ref 指代元素 */
 export const refTables = new Map<string, Map<string, number>>();
@@ -23,6 +24,8 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async ({ pageId, expand, threshold }) => {
       const handle = await session.getPage(pageId);
+      // 尽早挂上采集器，否则第一次失败时拿不到之前的 console 报错
+      await DiagnosticsCollector.attach(handle);
       const snap = await takeSnapshot(handle, { expand, threshold });
       refTables.set(handle.pageId, snap.refs);
       return {
@@ -34,6 +37,39 @@ export function createServer(session: BrowserSession): McpServer {
             snap.text
         }]
       };
+    }
+  );
+
+  server.registerTool(
+    "inspect",
+    {
+      description:
+        "取当前页面的诊断信息：截图、console 报错、失败网络请求。只在排查失败时调用——" +
+        "batch 失败时已经把这些一并返回了，通常不需要再调。",
+      inputSchema: {
+        pageId: z.string().optional(),
+        withScreenshot: z.boolean().optional().describe("是否附带截图，默认 true")
+      }
+    },
+    async ({ pageId, withScreenshot = true }) => {
+      const handle = await session.getPage(pageId);
+      const c = await DiagnosticsCollector.attach(handle);
+      const parts: Array<
+        { type: "text"; text: string } | { type: "image"; data: string; mimeType: string }
+      > = [
+        {
+          type: "text",
+          text:
+            `## console 报错（最近 ${c.consoleErrors().length} 条）\n` +
+            `${c.consoleErrors().join("\n") || "（无）"}\n\n` +
+            `## 失败请求（最近 ${c.failedRequests().length} 条）\n` +
+            `${c.failedRequests().join("\n") || "（无）"}`
+        }
+      ];
+      if (withScreenshot) {
+        parts.push({ type: "image", data: await c.screenshot(), mimeType: "image/png" });
+      }
+      return { content: parts };
     }
   );
 
