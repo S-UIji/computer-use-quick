@@ -65,6 +65,47 @@ describe("collapse", () => {
     expect(expanded.children).toHaveLength(3);
   });
 
+  it("周期为 3 的摊平重复单元也能折叠（行容器被裁掉后的真实形态）", () => {
+    // 行容器 <div> 无可及名称会被 prune 丢掉，一"行"摊平成三个兄弟节点，
+    // 连续相同签名最多只有 2 个——只认 p=1 的算法会完全漏掉。
+    const flat: PrunedNode = { role: "main", name: "", props: {}, children: [] };
+    for (let i = 1; i <= 20; i++) {
+      flat.children.push(
+        { role: "StaticText", name: `员工${i}`, props: {}, children: [] },
+        { role: "button", name: "查看详情", props: {}, children: [] },
+        { role: "button", name: "编辑", props: {}, children: [] }
+      );
+    }
+    const out = collapse(flat, { threshold: 3 });
+    expect(out.children).toHaveLength(1);
+    const g = out.children[0] as CollapsedGroup;
+    expect(g.count).toBe(20);
+    expect(g.items).toHaveLength(20);
+  });
+
+  it("周期内恒定的位置进 fields，只有变化的位置逐项列出", () => {
+    const flat: PrunedNode = { role: "main", name: "", props: {}, children: [] };
+    for (let i = 1; i <= 5; i++) {
+      flat.children.push(
+        { role: "StaticText", name: `员工${i}`, props: {}, children: [] },
+        { role: "button", name: "查看详情", props: {}, children: [] }
+      );
+    }
+    const g = collapse(flat, { threshold: 3 }).children[0] as CollapsedGroup;
+    expect(g.fields).toContain("查看详情");        // 每行都一样 → 结构说明
+    expect(g.items).toEqual(["员工1", "员工2", "员工3", "员工4", "员工5"]);
+    expect(g.items.join()).not.toContain("查看详情"); // 常量不该重复 5 遍
+  });
+
+  it("优先选最小周期：40 个相同按钮走 p=1 而非 p=2", () => {
+    const flat: PrunedNode = { role: "main", name: "", props: {}, children: [] };
+    for (let i = 0; i < 40; i++) {
+      flat.children.push({ role: "button", name: "编辑", props: {}, children: [] });
+    }
+    const g = collapse(flat, { threshold: 3 }).children[0] as CollapsedGroup;
+    expect(g.count).toBe(40);
+  });
+
   it("同一输入两次折叠产生相同的 groupId（可稳定引用）", () => {
     const root: PrunedNode = { role: "main", name: "", props: {}, children: [
       card("甲", "1"), card("乙", "2"), card("丙", "3")

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { prune } from "../../src/perception/prune.js";
-import type { RawAxNode } from "../../src/types.js";
+import type { RawAxNode, PrunedNode } from "../../src/types.js";
 
 function node(p: Partial<RawAxNode> & { nodeId: string }): RawAxNode {
   return { ignored: false, ...p } as RawAxNode;
@@ -32,7 +32,25 @@ describe("prune", () => {
 
   it("丢弃 ignored 节点", () => {
     const out = prune(tree, "1")!;
-    expect(out.children.some((c) => c.name === "隐藏按钮")).toBe(false);
+    expect(out.children.some((c) => (c as PrunedNode).name === "隐藏按钮")).toBe(false);
+  });
+
+  it("ignored 的包装节点不切断子树，后代要提升上来", () => {
+    // 真实 AX 树里 RootWebArea 与内容之间夹着 <html>/<body> 对应的
+    // ignored=true 的 role=none 节点。ignored 说的是「这个节点」不暴露，
+    // 不是「这棵子树」不暴露。
+    const wrapped: RawAxNode[] = [
+      node({ nodeId: "1", role: { value: "RootWebArea" }, childIds: ["2"] }),
+      node({ nodeId: "2", role: { value: "none" }, ignored: true, childIds: ["3"] }),
+      node({ nodeId: "3", role: { value: "none" }, ignored: true, childIds: ["4"] }),
+      node({ nodeId: "4", role: { value: "main" }, childIds: ["5"] }),
+      node({ nodeId: "5", role: { value: "button" }, name: { value: "登录" }, backendDOMNodeId: 7 })
+    ];
+    const out = prune(wrapped, "1")!;
+    const btn = out.children.find((c) => (c as PrunedNode).name === "登录") as PrunedNode | undefined;
+    expect(btn).toBeDefined();
+    expect(btn!.role).toBe("button");
+    expect(btn!.backendNodeId).toBe(7);
   });
 
   it("保留 backendNodeId 供后续定位", () => {
@@ -60,6 +78,32 @@ describe("prune", () => {
     ];
     const out = prune(withProps, "1")!;
     expect(out.children[0].props.checked).toBe("true");
+  });
+
+  it("丢弃与父节点 name 重复的文本节点（button 里的 StaticText/InlineTextBox）", () => {
+    const redundant: RawAxNode[] = [
+      node({ nodeId: "1", role: { value: "RootWebArea" }, name: { value: "页" }, childIds: ["2"] }),
+      node({ nodeId: "2", role: { value: "button" }, name: { value: "查看详情" }, backendDOMNodeId: 9, childIds: ["3"] }),
+      node({ nodeId: "3", role: { value: "StaticText" }, name: { value: "查看详情" }, childIds: ["4"] }),
+      node({ nodeId: "4", role: { value: "InlineTextBox" }, name: { value: "查看详情" } })
+    ];
+    const out = prune(redundant, "1")!;
+    expect(out.children).toHaveLength(1);
+    expect((out.children[0] as PrunedNode).children).toHaveLength(0);
+  });
+
+  it("保留没有祖先承载的独立文本（列表里的 <span>员工1</span>）", () => {
+    const standalone: RawAxNode[] = [
+      node({ nodeId: "1", role: { value: "RootWebArea" }, name: { value: "同构列表" }, childIds: ["2"] }),
+      node({ nodeId: "2", role: { value: "StaticText" }, name: { value: "员工1" }, childIds: ["3"] }),
+      node({ nodeId: "3", role: { value: "InlineTextBox" }, name: { value: "员工1" } })
+    ];
+    const out = prune(standalone, "1")!;
+    expect(out.children).toHaveLength(1);
+    const st = out.children[0] as PrunedNode;
+    expect(st.name).toBe("员工1");
+    // 它自己的 InlineTextBox 副本仍应被丢掉
+    expect(st.children).toHaveLength(0);
   });
 
   it("保留有 name 的容器节点，即使它本身不可交互", () => {
