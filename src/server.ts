@@ -6,9 +6,21 @@ import { takeSnapshot } from "./perception/snapshot.js";
 import { DiagnosticsCollector } from "./diagnostics/collector.js";
 import { NetworkTracker } from "./waiter/stability.js";
 import { runBatch } from "./executor/batch.js";
+import { saveTrace, loadTrace } from "./trace/store.js";
+import { replayTrace } from "./trace/replay.js";
+import { renderRunRecord } from "./report/runRecord.js";
 
 /** 最近一次 snapshot 的 ref 表，按 pageId 保存，供 batch 用 ref 指代元素 */
 export const refTables = new Map<string, Map<string, number>>();
+
+/** 本 session 内每个页面成功执行过的步骤（ref 已固化成 descriptor），供 save_trace 消费 */
+export const sessionSteps = new Map<string, Step[]>();
+
+export function recordSteps(pageId: string, capturedSteps: Step[]): void {
+  const acc = sessionSteps.get(pageId) ?? [];
+  acc.push(...capturedSteps);
+  sessionSteps.set(pageId, acc);
+}
 
 export function createServer(session: BrowserSession): McpServer {
   const server = new McpServer({ name: "computer-use-quick", version: "0.1.0" });
@@ -76,6 +88,7 @@ export function createServer(session: BrowserSession): McpServer {
         steps: steps as unknown as Step[]
       });
       refTables.set(handle.pageId, refs);
+      recordSteps(handle.pageId, r.capturedSteps);
 
       if (r.ok) {
         const total = r.results.reduce((a, s) => a + s.durationMs, 0);
@@ -94,6 +107,64 @@ export function createServer(session: BrowserSession): McpServer {
         `## 当前快照\n${f.snapshot}\n\n` +
         `## console 报错\n${f.consoleErrors.join("\n") || "（无）"}\n\n` +
         `## 失败请求\n${f.failedRequests.join("\n") || "（无）"}` }] };
+    }
+  );
+
+  server.registerTool(
+    "save_trace",
+    {
+      description:
+        "把本次 session 中成功执行过的步骤固化成可回放的 trace 文件。" +
+        "所有 ref 已自动转成稳定的 descriptor；凭证必须是 ${VAR} 占位符，" +
+        "写了明文会直接拒绝保存。",
+      inputSchema: {
+        name: z.string().describe("用例名，将作为文件名"),
+        baseUrl: z.string().describe("被测系统根地址"),
+        dir: z.string().optional().describe("保存目录，默认 ./traces"),
+        pageId: z.string().optional()
+      }
+    },
+    async ({ name, baseUrl, dir, pageId }) => {
+      const handle = await session.getPage(pageId);
+      const steps = sessionSteps.get(handle.pageId) ?? [];
+      if (steps.length === 0) {
+        return { content: [{ type: "text" as const,
+          text: "本 session 尚无成功执行的步骤，无可保存内容。" }] };
+      }
+      const path = await saveTrace(dir ?? "./traces", {
+        name, baseUrl, createdAt: new Date().toISOString(), steps
+      });
+      return { content: [{ type: "text" as const, text: `已保存 ${steps.length} 步到 ${path}` }] };
+    }
+  );
+
+  server.registerTool(
+    "replay",
+    {
+      description:
+        "回放一条已固化的 trace：一次调用跑完整条用例，全程不再经过模型。CI 回归用这个。" +
+        "返回逐步耗时台账、定位漂移告警（首选策略失效但回放仍成功=页面可能已改版）" +
+        "和失败上下文。",
+      inputSchema: {
+        tracePath: z.string().describe("trace 文件路径"),
+        vars: z.record(z.string()).optional().describe("变量表，凭证从这里传"),
+        slowMoMs: z.number().int().min(0).optional()
+          .describe("每步之间的延迟，演示场景用，默认 0"),
+        pageId: z.string().optional()
+      }
+    },
+    async ({ tracePath, vars, slowMoMs, pageId }) => {
+      const handle = await session.getPage(pageId);
+      const collector = await DiagnosticsCollector.attach(handle);
+      const tracker = await NetworkTracker.attach(handle);
+      collector.clear();
+
+      const trace = await loadTrace(tracePath);
+      const rec = await replayTrace({
+        handle, tracker, collector, trace, slowMoMs,
+        vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>
+      });
+      return { content: [{ type: "text" as const, text: renderRunRecord(rec) }] };
     }
   );
 

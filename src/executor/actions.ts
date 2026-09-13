@@ -1,5 +1,5 @@
 import type { PageHandle } from "../session/browser.js";
-import type { Step, TargetRef } from "../types.js";
+import type { ResolveResult, Step, TargetRef } from "../types.js";
 import { resolveTarget } from "../locator/resolve.js";
 import { NetworkTracker, waitStable } from "../waiter/stability.js";
 import { waitFor } from "../waiter/explicit.js";
@@ -9,6 +9,8 @@ export interface ActionContext {
   tracker: NetworkTracker;
   refs: Map<string, number>;
   vars: Record<string, string>;
+  /** 最近一次 target 解析的结果，供 batch 记录 strategyIndex 与固化 descriptor */
+  lastResolve?: ResolveResult;
 }
 
 async function centerOf(
@@ -24,7 +26,9 @@ async function centerOf(
 }
 
 async function nodeIdFor(ctx: ActionContext, target: TargetRef): Promise<number> {
-  return (await resolveTarget(ctx.handle, target, ctx.refs)).backendNodeId;
+  const r = await resolveTarget(ctx.handle, target, ctx.refs);
+  ctx.lastResolve = r;
+  return r.backendNodeId;
 }
 
 /**

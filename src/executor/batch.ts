@@ -7,6 +7,7 @@ import { runAssert, AssertionFailure } from "../assertion/assert.js";
 import { interpolateStep } from "./variables.js";
 import { LocatorError } from "../locator/resolve.js";
 import { takeSnapshot } from "../perception/snapshot.js";
+import { buildDescriptor } from "../locator/descriptor.js";
 
 export interface BatchOptions {
   handle: PageHandle;
@@ -15,6 +16,8 @@ export interface BatchOptions {
   refs: Map<string, number>;
   vars: Record<string, string>;
   steps: Step[];
+  /** 成功执行后是否把 {ref} 固化成 {descriptor}，供 save_trace 使用。replay 时传 false。 */
+  captureDescriptors?: boolean;
 }
 
 export interface BatchResult {
@@ -22,6 +25,8 @@ export interface BatchResult {
   results: StepResult[];
   vars: Record<string, string>;
   snapshot: string;
+  /** 固化后的步骤：所有 {ref} 已替换为 {descriptor}，可直接写进 trace */
+  capturedSteps: Step[];
   failure?: FailureContext;
 }
 
@@ -51,6 +56,7 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
   };
 
   const results: StepResult[] = [];
+  const capturedSteps: Step[] = [];
 
   for (let i = 0; i < opts.steps.length; i++) {
     const raw = opts.steps[i];
@@ -63,16 +69,30 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
       } else {
         await runAction(ctx, step);
       }
+      // ref 是单次快照内的短期句柄，不能进 trace。趁元素刚解析成功、
+      // 还在页面上时把它固化成长期 descriptor（懒计算的正确时机）。
+      let captured = step;
+      if (opts.captureDescriptors !== false && ctx.lastResolve && "target" in step) {
+        const target = (step as { target: unknown }).target;
+        if (target && typeof target === "object" && "ref" in target) {
+          const descriptor = await buildDescriptor(opts.handle, ctx.lastResolve.backendNodeId);
+          captured = { ...step, target: { descriptor } } as Step;
+        }
+      }
+      capturedSteps.push(captured);
+
       results.push({
         index: i,
         action: raw.action,
         ok: true,
         durationMs: Date.now() - t0,
+        strategyIndex: ctx.lastResolve?.strategyIndex,
         // sleep 成功也要显形：每出现一次都是一处该改成显式 wait 的技术债
         error: raw.action === "sleep"
           ? "使用了固定 sleep，建议改为显式 wait 条件"
           : undefined
       });
+      ctx.lastResolve = undefined;
     } catch (err) {
       const { kind, message, candidates } = classify(err);
       results.push({
@@ -89,6 +109,7 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
         results,
         vars: ctx.vars,
         snapshot: snapshotText,
+        capturedSteps,
         failure: {
           failedIndex: i,
           failedStep: raw,
@@ -107,5 +128,5 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
   opts.refs.clear();
   for (const [k, v] of final.refs) opts.refs.set(k, v);
 
-  return { ok: true, results, vars: ctx.vars, snapshot: final.text };
+  return { ok: true, results, vars: ctx.vars, snapshot: final.text, capturedSteps };
 }
