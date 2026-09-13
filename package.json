@@ -7,9 +7,9 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "vitest run",
+    "test": "tsc && vitest run",
     "test:unit": "vitest run test/unit",
-    "test:integration": "vitest run test/integration",
+    "test:integration": "tsc && vitest run test/integration",
     "bench": "node --experimental-strip-types test/bench/cli.ts"
   },
   "dependencies": {

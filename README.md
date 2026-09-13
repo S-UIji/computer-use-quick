@@ -120,10 +120,14 @@ npm run bench -- ./traces/smoke-login.json
 ## 开发
 
 ```bash
-npm test                  # 全部（23 个文件 / 152 个测试）
+npm test                  # 先 tsc 构建再跑全部（25 个文件 / 162 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```
+
+`test/integration/mcp-server.test.ts` 会把 `dist/index.js` 作为真实 MCP server
+拉起来走 stdio 协议对话——这是唯一覆盖工具注册与返回格式的测试，所以 `npm test`
+会先 `tsc`，免得拿旧产物测出假绿。
 
 集成测试通过 vitest `globalSetup` **全套件共享一个 Chrome 实例**。
 不要在测试文件里各自 `puppeteer.launch()`——那样会有 N 次收尾，
