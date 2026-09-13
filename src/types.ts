@@ -18,7 +18,7 @@ export interface PrunedNode {
   /** 附加语义：value / checked / pressed / expanded / disabled / description */
   props: Record<string, string>;
   backendNodeId?: number;
-  children: PrunedNode[];
+  children: SnapshotNode[];
 }
 
 /** 同构折叠后，快照树里的一个折叠组 */
@@ -35,6 +35,10 @@ export interface CollapsedGroup {
 }
 
 export type SnapshotNode = PrunedNode | CollapsedGroup;
+
+export function isCollapsedGroup(n: SnapshotNode): n is CollapsedGroup {
+  return (n as CollapsedGroup).kind === "collapsed-group";
+}
 
 export interface SnapshotResult {
   /** 渲染好的缩进文本，直接给模型 */
