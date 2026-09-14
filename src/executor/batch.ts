@@ -3,6 +3,7 @@ import type { NetworkTracker } from "../waiter/stability.js";
 import type { DiagnosticsCollector } from "../diagnostics/collector.js";
 import type { FailureContext, FailureKind, Step, StepResult } from "../types.js";
 import { runAction, type ActionContext } from "./actions.js";
+import type { StabilityOptions } from "../waiter/stability.js";
 import { runAssert, AssertionFailure } from "../assertion/assert.js";
 import { interpolateStep } from "./variables.js";
 import { LocatorError } from "../locator/resolve.js";
@@ -18,6 +19,8 @@ export interface BatchOptions {
   steps: Step[];
   /** 成功执行后是否把 {ref} 固化成 {descriptor}，供 save_trace 使用。replay 时传 false。 */
   captureDescriptors?: boolean;
+  /** 隐式稳定性等待参数，覆盖 waitStable 的默认值 */
+  stability?: StabilityOptions;
 }
 
 export interface BatchResult {
@@ -43,8 +46,12 @@ function classify(err: unknown): {
   }
   const message = err instanceof Error ? err.message : String(err);
   if (/超时/.test(message)) return { kind: "timeout", message };
-  if (/navigat/i.test(message)) return { kind: "navigation-failed", message };
-  return { kind: "target-not-found", message };
+  if (/navigat|net::ERR|Target closed|target closed/i.test(message)) {
+    return { kind: "navigation-failed", message };
+  }
+  // 其余一律归为"动作执行失败"。以前这里兜底成 target-not-found，
+  // 于是"点击其实成功了、只是后续步骤出错"也会被标成找不到元素，排障被带偏。
+  return { kind: "action-failed", message };
 }
 
 export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
@@ -52,7 +59,8 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
     handle: opts.handle,
     tracker: opts.tracker,
     refs: opts.refs,
-    vars: { ...opts.vars }
+    vars: { ...opts.vars },
+    stability: opts.stability
   };
 
   const results: StepResult[] = [];
@@ -61,24 +69,42 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
   for (let i = 0; i < opts.steps.length; i++) {
     const raw = opts.steps[i];
     const t0 = Date.now();
+    const notes: string[] = [];
+    ctx.onResolved = undefined;
 
     try {
       const step = interpolateStep(raw, ctx.vars);
+      // ref 是单次快照内的短期句柄，不能进 trace，要固化成长期 descriptor。
+      // 固化的时机必须早于动作本身：动作一旦触发导航或打开新标签，原元素就失效了，
+      // 事后再固化必然失败——早先的版本因此把"点击成功且页面已跳转"误判为步骤失败。
+      const target = (step as { target?: { ref?: string } }).target;
+      const refName = target && typeof target === "object" && "ref" in target
+        ? (target as { ref: string }).ref
+        : undefined;
+
+      let captured = step;
+      if (opts.captureDescriptors !== false && refName !== undefined) {
+        ctx.onResolved = async (backendNodeId: number) => {
+          try {
+            const descriptor = await buildDescriptor(opts.handle, backendNodeId);
+            captured = { ...step, target: { descriptor } } as Step;
+          } catch (err) {
+            // 固化失败只降级成警告：跑得通比能回放重要，
+            // 不能因为拿不到 descriptor 就把一个已经成功的动作判成失败。
+            notes.push(
+              `ref「${refName}」固化成 descriptor 失败（${err instanceof Error ? err.message : String(err)}）：` +
+              `这一步不会进 trace，save_trace 时会提示需要重新探索`
+            );
+          }
+        };
+      }
+
       if (step.action === "assert") {
         await runAssert(ctx, step);
       } else {
         await runAction(ctx, step);
       }
-      // ref 是单次快照内的短期句柄，不能进 trace。趁元素刚解析成功、
-      // 还在页面上时把它固化成长期 descriptor（懒计算的正确时机）。
-      let captured = step;
-      if (opts.captureDescriptors !== false && ctx.lastResolve && "target" in step) {
-        const target = (step as { target: unknown }).target;
-        if (target && typeof target === "object" && "ref" in target) {
-          const descriptor = await buildDescriptor(opts.handle, ctx.lastResolve.backendNodeId);
-          captured = { ...step, target: { descriptor } } as Step;
-        }
-      }
+      ctx.onResolved = undefined;
       capturedSteps.push(captured);
 
       results.push({
@@ -87,13 +113,15 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
         ok: true,
         durationMs: Date.now() - t0,
         strategyIndex: ctx.lastResolve?.strategyIndex,
-        // sleep 成功也要显形：每出现一次都是一处该改成显式 wait 的技术债
-        error: raw.action === "sleep"
-          ? "使用了固定 sleep，建议改为显式 wait 条件"
-          : undefined
+        error: [
+          // sleep 成功也要显形：每出现一次都是一处该改成显式 wait 的技术债
+          raw.action === "sleep" ? "使用了固定 sleep，建议改为显式 wait 条件" : "",
+          ...notes
+        ].filter(Boolean).join("；") || undefined
       });
       ctx.lastResolve = undefined;
     } catch (err) {
+      ctx.onResolved = undefined;
       const { kind, message, candidates } = classify(err);
       results.push({
         index: i, action: raw.action, ok: false, durationMs: Date.now() - t0, error: message

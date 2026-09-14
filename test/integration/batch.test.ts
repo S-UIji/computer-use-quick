@@ -3,6 +3,7 @@ import { BrowserSession, type PageHandle } from "../../src/session/browser.js";
 import { NetworkTracker } from "../../src/waiter/stability.js";
 import { DiagnosticsCollector } from "../../src/diagnostics/collector.js";
 import { runBatch } from "../../src/executor/batch.js";
+import { takeSnapshot } from "../../src/perception/snapshot.js";
 import type { Descriptor, Step } from "../../src/types.js";
 
 let session: BrowserSession;
@@ -138,5 +139,67 @@ describe("runBatch", () => {
     });
     expect(r.ok).toBe(true);
     expect(refs.size).toBeGreaterThan(0);
+  });
+
+  /** 取快照里第一条指定文字所在的 ref，并把 ref 表灌进 refs */
+  async function snapshotRefOf(handle: PageHandle, text: string, refs: Map<string, number>) {
+    const snap = await takeSnapshot(handle, { threshold: 99 });
+    const line = snap.text.split("\n").find((l) => l.includes(`"${text}"`));
+    if (!line) throw new Error(`快照里没有「${text}」`);
+    const ref = line.match(/\[(e\d+)\]/)![1];
+    refs.clear();
+    for (const [k, v] of snap.refs) refs.set(k, v);
+    return ref;
+  }
+
+  it("ref 点击会导航的链接：动作照旧算成功，descriptor 在动作前就固化好", async () => {
+    const handle = await session.getPage();
+    const refs = new Map<string, number>();
+    await runBatch({ handle, tracker, collector, refs, vars: {},
+      steps: [{ action: "navigate", url: `${fx.url}/link-navigates.html` }] });
+
+    const ref = await snapshotRefOf(handle, "去登录页", refs);
+    const r = await runBatch({ handle, tracker, collector, refs, vars: {},
+      steps: [{ action: "click", target: { ref } }] });
+
+    // 以前这里会因为"动作之后元素已随导航失效"被误判成 target-not-found
+    expect(r.ok).toBe(true);
+    expect(r.failure).toBeUndefined();
+    expect(await handle.page.url()).toContain("form.html");
+    const captured = r.capturedSteps[0] as { target?: { descriptor?: unknown } };
+    expect(captured.target?.descriptor).toBeDefined();
+  });
+
+  it("ref 点击 target=_blank 链接：不再挂死，新标签页可被 listPages 发现", async () => {
+    const handle = await session.getPage();
+    const refs = new Map<string, number>();
+    await runBatch({ handle, tracker, collector, refs, vars: {},
+      steps: [{ action: "navigate", url: `${fx.url}/link-navigates.html` }] });
+
+    const ref = await snapshotRefOf(handle, "开新标签", refs);
+    const t0 = Date.now();
+    const r = await runBatch({ handle, tracker, collector, refs, vars: {},
+      steps: [{ action: "click", target: { ref } }] });
+    const ms = Date.now() - t0;
+
+    // 守住这条回归：以前这里会一直挂到客户端超时
+    expect(r.ok).toBe(true);
+    expect(ms).toBeLessThan(10_000);
+
+    // 新标签在 headless 下会被弹窗拦截偶发挡掉（Chrome 的用户激活衰减），
+    // 所以只断言"如果开了新标签，listPages 必须能看到它"；新 target 的 attach 是异步的。
+    let pages = await session.listPages();
+    for (let i = 0; i < 12 && pages.length < 2; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      pages = await session.listPages();
+    }
+    if (pages.length > 1) {
+      expect(pages.some((p) => p.url.includes("form.html"))).toBe(true);
+    }
+
+    // 清理：关掉新标签页，别影响同一套件里的其它用例
+    for (const p of (await handle.page.browser().pages()).slice(1)) {
+      await p.close().catch(() => {});
+    }
   });
 });

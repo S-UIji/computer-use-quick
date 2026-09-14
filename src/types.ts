@@ -119,7 +119,8 @@ export type FailureKind =
   | "ambiguous"
   | "timeout"
   | "assert-failed"
-  | "navigation-failed";
+  | "navigation-failed"
+  | "action-failed";
 
 export interface FailureContext {
   failedIndex: number;

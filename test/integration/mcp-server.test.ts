@@ -62,10 +62,10 @@ describe("MCP server（真实 stdio 协议）", () => {
     expect(r.result.serverInfo).toMatchObject({ name: "computer-use-quick", version: "0.1.0" });
   });
 
-  it("tools/list 恰好暴露五个工具", async () => {
+  it("tools/list 恰好暴露六个工具（多了 list_pages）", async () => {
     send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     const names = (await wait(2)).result.tools.map((t: { name: string }) => t.name).sort();
-    expect(names).toEqual(["batch", "inspect", "replay", "save_trace", "snapshot"]);
+    expect(names).toEqual(["batch", "inspect", "list_pages", "replay", "save_trace", "snapshot"]);
   });
 
   it("刻意不提供单步 click/fill 工具（防止退回一次一步）", async () => {
@@ -88,6 +88,15 @@ describe("MCP server（真实 stdio 协议）", () => {
     const r = await wait(5);
     expect(r.result.content[0].type).toBe("text");
     expect(r.result.content[0].text).toContain("页面快照");
+  });
+
+  it("tools/call list_pages 能列出标签页", async () => {
+    send({ jsonrpc: "2.0", id: 8, method: "tools/call", params: {
+      name: "list_pages", arguments: {}
+    }});
+    const text = (await wait(8)).result.content[0].text;
+    expect(text).toContain("标签页");
+    expect(text).toContain("*");
   });
 
   it("tools/call batch 能真的驱动页面", async () => {
@@ -118,7 +127,10 @@ describe("MCP server（真实 stdio 协议）", () => {
           target: { descriptor: { strategies: [{ kind: "css", value: "#does-not-exist" }], framePath: [] } } }
       ]}
     }});
-    const text = (await wait(7)).result.content[0].text;
+    const res = await wait(7);
+    // 失败要在协议层可辨，而不是只体现在文案里
+    expect(res.result.isError).toBe(true);
+    const text = res.result.content[0].text;
     expect(text).toContain("❌");
     expect(text).toContain("target-not-found");
     expect(text).toContain("## 当前快照");

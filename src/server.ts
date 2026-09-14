@@ -64,6 +64,7 @@ export function createServer(session: BrowserSession): McpServer {
         "步骤类型：navigate/click/fill/select/press/hover/scroll/wait/sleep/assert/extract。\n" +
         "每个动作后自动做稳定性等待，无需写 sleep（纯 setTimeout 触发的更新除外，那种要用 wait）。\n" +
         "fail-fast：任一步失败即停，并一次性返回失败步、当前快照、console 报错和失败请求。\n" +
+        "点击会打开新标签页的链接后，用 list_pages 拿到新标签的 pageId 再做后续操作。\n" +
         "target 用 snapshot 返回的 ref（{\"ref\":\"e3\"}）或 descriptor。\n" +
         "提示：快照里被折叠的组，组内元素没有 ref，但【不需要先 expand】——" +
         "直接用 container-role-name 定位即可，containerText 取组内条目的文字、name 取 fields 里的项，" +
@@ -73,10 +74,18 @@ export function createServer(session: BrowserSession): McpServer {
         pageId: z.string().optional(),
         steps: z.array(z.record(z.any())).min(1).describe("步骤数组，见 description"),
         vars: z.record(z.string()).optional()
-          .describe("变量表，供 ${VAR} 插值；凭证从这里传，不要写进步骤字面量")
+          .describe("变量表，供 ${VAR} 插值；凭证从这里传，不要写进步骤字面量"),
+        stability: z.object({
+          domQuietMs: z.number().int().min(0).optional(),
+          networkQuietMs: z.number().int().min(0).optional(),
+          timeoutMs: z.number().int().min(0).optional()
+        }).optional().describe(
+          "隐式稳定性等待调参（默认 DOM 静默 150ms、网络静默 500ms、上限 5000ms）。" +
+          "页面持续有信标请求、或明确不需要等网络时调小 timeoutMs 能显著提速"
+        )
       }
     },
-    async ({ pageId, steps, vars }) => {
+    async ({ pageId, steps, vars, stability }) => {
       const handle = await session.getPage(pageId);
       const collector = await DiagnosticsCollector.attach(handle);
       const tracker = await NetworkTracker.attach(handle);
@@ -85,7 +94,8 @@ export function createServer(session: BrowserSession): McpServer {
       const r = await runBatch({
         handle, tracker, collector, refs,
         vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
-        steps: steps as unknown as Step[]
+        steps: steps as unknown as Step[],
+        stability
       });
       refTables.set(handle.pageId, refs);
       recordSteps(handle.pageId, r.capturedSteps);
@@ -100,13 +110,34 @@ export function createServer(session: BrowserSession): McpServer {
       }
 
       const f = r.failure!;
-      return { content: [{ type: "text" as const, text:
+      // isError 让客户端在协议层就能看出失败，不必去解析文案
+      return { isError: true, content: [{ type: "text" as const, text:
         `❌ 第 ${f.failedIndex + 1} 步失败：${f.kind}\n${f.message}\n\n` +
         `## 失败步骤\n${JSON.stringify(f.failedStep, null, 2)}\n\n` +
         (f.candidates?.length ? `## 同容器内的其它文字（可用于消歧）\n${f.candidates.join("\n")}\n\n` : "") +
         `## 当前快照\n${f.snapshot}\n\n` +
         `## console 报错\n${f.consoleErrors.join("\n") || "（无）"}\n\n` +
         `## 失败请求\n${f.failedRequests.join("\n") || "（无）"}` }] };
+    }
+  );
+
+  server.registerTool(
+    "list_pages",
+    {
+      description:
+        "列出浏览器里当前打开的所有标签页及各自的 pageId（* 标记的是默认作用页）。" +
+        "点击会打开新标签的链接后，必须先用这里拿到的 pageId 去调 snapshot/batch，" +
+        "否则读到的是第一个标签页而不是刚打开的那个。",
+      inputSchema: {}
+    },
+    async () => {
+      const pages = await session.listPages();
+      const current = session.currentPageId() ?? pages[0]?.pageId;
+      const lines = pages.map((p) =>
+        `${p.pageId === current ? "*" : " "} ${p.pageId}\n    ${p.title || "(无标题)"}\n    ${p.url}`
+      );
+      return { content: [{ type: "text" as const, text:
+        `# 标签页（${pages.length}）\n\n${lines.join("\n") || "（没有可用页面）"}` }] };
     }
   );
 

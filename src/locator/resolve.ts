@@ -22,6 +22,18 @@ async function backendIdOfNodeId(handle: PageHandle, nodeId: number): Promise<nu
 }
 
 /** 用 CSS 选择器在 scope 内找唯一元素；找不到或非唯一返回 null */
+/** 元素是否真的"能点"：有布局盒且宽高大于 0。命中不可见节点时不能当作解析成功。 */
+export async function isActionable(handle: PageHandle, backendNodeId: number): Promise<boolean> {
+  try {
+    const { model } = (await handle.cdp.send("DOM.getBoxModel", { backendNodeId })) as {
+      model?: { width: number; height: number };
+    };
+    return !!model && model.width > 0 && model.height > 0;
+  } catch {
+    return false;
+  }
+}
+
 async function bySelector(
   handle: PageHandle,
   scope: number,
@@ -164,9 +176,25 @@ async function tryStrategy(
   }
 }
 
-export async function resolve(handle: PageHandle, d: Descriptor): Promise<ResolveResult> {
+export interface ResolveOptions {
+  /**
+   * 交互类动作（click/fill/select/hover）要求目标"可见且可点"。
+   * 命中不可见节点时不当成解析成功，而是继续试后面的策略——
+   * 否则会拿着一个 display:none 的节点去 scrollIntoView/派发鼠标事件，
+   * 报出来的是 `Node does not have a layout object` 这种看不懂的协议错误。
+   */
+  requireActionable?: boolean;
+}
+
+export async function resolve(
+  handle: PageHandle,
+  d: Descriptor,
+  opts: ResolveOptions = {}
+): Promise<ResolveResult> {
   const scope = await scopeNodeId(handle, d.framePath);
   const tried: string[] = [];
+  /** 命中过但不可见/不可点的元素，留到全部策略都落空时报错用 */
+  let invisibleHit: number | null = null;
 
   for (let i = 0; i < d.strategies.length; i++) {
     const s = d.strategies[i];
@@ -176,8 +204,23 @@ export async function resolve(handle: PageHandle, d: Descriptor): Promise<Resolv
     } catch {
       id = null;
     }
-    if (id !== null) return { backendNodeId: id, strategyIndex: i, strategyKind: s.kind };
+    if (id !== null) {
+      if (!opts.requireActionable || (await isActionable(handle, id))) {
+        return { backendNodeId: id, strategyIndex: i, strategyKind: s.kind };
+      }
+      invisibleHit ??= id;
+      tried.push(`${s.kind}(命中但不可见)`);
+      continue;
+    }
     tried.push(s.kind);
+  }
+
+  if (invisibleHit !== null) {
+    throw new LocatorError(
+      `命中了元素但它不可见/不可点击（无布局盒），已继续尝试其余策略：${tried.join(" → ")}`,
+      "target-not-found",
+      d.distinguishers ?? []
+    );
   }
 
   throw new LocatorError(
@@ -190,7 +233,8 @@ export async function resolve(handle: PageHandle, d: Descriptor): Promise<Resolv
 export async function resolveTarget(
   handle: PageHandle,
   target: TargetRef,
-  refs: Map<string, number>
+  refs: Map<string, number>,
+  opts: ResolveOptions = {}
 ): Promise<ResolveResult> {
   if ("ref" in target) {
     const id = refs.get(target.ref);
@@ -202,5 +246,5 @@ export async function resolveTarget(
     }
     return { backendNodeId: id, strategyIndex: -1, strategyKind: "css" };
   }
-  return resolve(handle, target.descriptor);
+  return resolve(handle, target.descriptor, opts);
 }

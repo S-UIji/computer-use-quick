@@ -107,4 +107,38 @@ describe("resolve", () => {
     });
     expect((result as { value: number }).value).toBe(0);
   });
+
+  it("交互目标命中不可见节点时，跳过它继续试后面的策略", async () => {
+    const h = await open("hidden-dup.html");
+    const { root } = await h.cdp.send("DOM.getDocument", { depth: 1 });
+    const { nodeId } = await h.cdp.send("DOM.querySelector", {
+      nodeId: (root as { nodeId: number }).nodeId, selector: "#real"
+    });
+    const { node } = await h.cdp.send("DOM.describeNode", { nodeId });
+    const realBackendId = (node as { backendNodeId: number }).backendNodeId;
+
+    const d = {
+      strategies: [
+        { kind: "css", value: "#ghost" } as const,                    // 命中但不可见
+        { kind: "role-name", role: "button", name: "提交" } as const   // 唯一可见
+      ],
+      framePath: []
+    };
+
+    // 不要求可点：照旧返回隐藏节点（extract/assert 这类只读场景不受影响）
+    expect((await resolve(h, d)).backendNodeId).not.toBe(realBackendId);
+
+    // 要求可点：跳过隐藏节点，落到下一条策略
+    const r = await resolve(h, d, { requireActionable: true });
+    expect(r.backendNodeId).toBe(realBackendId);
+    expect(r.strategyIndex).toBe(1);
+  });
+
+  it("策略全部只命中不可见节点时，报错说明命中但不可见", async () => {
+    const h = await open("hidden-dup.html");
+    await expect(
+      resolve(h, { strategies: [{ kind: "css", value: "#ghost" }], framePath: [] },
+        { requireActionable: true })
+    ).rejects.toMatchObject({ kind: "target-not-found" });
+  });
 });

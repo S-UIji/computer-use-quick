@@ -36,6 +36,11 @@ export class BrowserSession {
     return out;
   }
 
+  /** 当前默认作用的页面 id。未显式选页时 getPage() 用的就是它（再兜底到第一个标签页） */
+  currentPageId(): string | undefined {
+    return this.selected;
+  }
+
   selectPage(pageId: string): void {
     this.selected = pageId;
   }

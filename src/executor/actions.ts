@@ -1,7 +1,7 @@
 import type { PageHandle } from "../session/browser.js";
 import type { ResolveResult, Step, TargetRef } from "../types.js";
-import { resolveTarget } from "../locator/resolve.js";
-import { NetworkTracker, waitStable } from "../waiter/stability.js";
+import { resolveTarget, type ResolveOptions } from "../locator/resolve.js";
+import { NetworkTracker, waitStable, type StabilityOptions } from "../waiter/stability.js";
 import { waitFor } from "../waiter/explicit.js";
 
 export interface ActionContext {
@@ -11,6 +11,13 @@ export interface ActionContext {
   vars: Record<string, string>;
   /** 最近一次 target 解析的结果，供 batch 记录 strategyIndex 与固化 descriptor */
   lastResolve?: ResolveResult;
+  /** 隐式稳定性等待参数，batch 可整体覆盖（默认值见 waitStable） */
+  stability?: StabilityOptions;
+  /**
+   * 元素刚解析出来、动作尚未执行时的回调。batch 用它把 ref 固化成 descriptor，
+   * 这个时机是最后的安全窗口——动作可能把页面导航走。
+   */
+  onResolved?: (backendNodeId: number) => Promise<void>;
 }
 
 async function centerOf(
@@ -25,10 +32,28 @@ async function centerOf(
   return { x: (x1 + x3) / 2, y: (y1 + y3) / 2 };
 }
 
-async function nodeIdFor(ctx: ActionContext, target: TargetRef): Promise<number> {
-  const r = await resolveTarget(ctx.handle, target, ctx.refs);
+async function nodeIdFor(
+  ctx: ActionContext,
+  target: TargetRef,
+  opts: ResolveOptions = {}
+): Promise<number> {
+  const r = await resolveTarget(ctx.handle, target, ctx.refs, opts);
   ctx.lastResolve = r;
+  await ctx.onResolved?.(r.backendNodeId);
   return r.backendNodeId;
+}
+
+/** 交互类动作要求目标可见可点：命中不可见节点时继续试后面的策略，而不是拿协议错误收场 */
+const ACTIONABLE: ResolveOptions = { requireActionable: true };
+
+/**
+ * 派发输入事件前把被驱动的页面提到前台。
+ * 实测：后台标签页里的 Input.dispatchMouseEvent 要等 ~5s 才返回（前台 8-46ms），
+ * 点开新标签页、或浏览器里还开着别的标签时，每一步都会被拖满这个延迟；
+ * Page.bringToFront 一次就把 5022ms 降到 28ms。
+ */
+async function bringToFront(handle: PageHandle): Promise<void> {
+  await handle.cdp.send("Page.bringToFront").catch(() => {});
 }
 
 /**
@@ -75,12 +100,14 @@ export async function runAction(ctx: ActionContext, step: Step): Promise<void> {
     }
 
     case "click": {
-      await realClick(handle, await nodeIdFor(ctx, step.target));
+      await bringToFront(handle);
+      await realClick(handle, await nodeIdFor(ctx, step.target, ACTIONABLE));
       break;
     }
 
     case "fill": {
-      const id = await nodeIdFor(ctx, step.target);
+      await bringToFront(handle);
+      const id = await nodeIdFor(ctx, step.target, ACTIONABLE);
       await handle.cdp.send("DOM.scrollIntoViewIfNeeded", { backendNodeId: id });
       await handle.cdp.send("DOM.focus", { backendNodeId: id });
       // 全选后插入：走真实输入路径，会正常触发 input/change
@@ -96,7 +123,8 @@ export async function runAction(ctx: ActionContext, step: Step): Promise<void> {
     case "select": {
       // 原生 <select> 的下拉是 OS 级控件，CDP 点不开。
       // 这是唯一一处刻意走 JS 赋值的 action，并显式补发 input/change 事件。
-      const id = await nodeIdFor(ctx, step.target);
+      await bringToFront(handle);
+      const id = await nodeIdFor(ctx, step.target, ACTIONABLE);
       const { object } = (await handle.cdp.send("DOM.resolveNode", { backendNodeId: id })) as {
         object: { objectId: string };
       };
@@ -115,18 +143,21 @@ export async function runAction(ctx: ActionContext, step: Step): Promise<void> {
     }
 
     case "press": {
+      await bringToFront(handle);
       await handle.cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: step.key });
       await handle.cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: step.key });
       break;
     }
 
     case "hover": {
-      const { x, y } = await centerOf(handle, await nodeIdFor(ctx, step.target));
+      await bringToFront(handle);
+      const { x, y } = await centerOf(handle, await nodeIdFor(ctx, step.target, ACTIONABLE));
       await handle.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
       break;
     }
 
     case "scroll": {
+      await bringToFront(handle);
       if (step.target) {
         await handle.cdp.send("DOM.scrollIntoViewIfNeeded", {
           backendNodeId: await nodeIdFor(ctx, step.target)
@@ -164,5 +195,5 @@ export async function runAction(ctx: ActionContext, step: Step): Promise<void> {
   }
 
   // 除 wait/sleep/extract 外，每个动作后自动隐式等待（spec §7.2）
-  await waitStable(handle, tracker);
+  await waitStable(handle, tracker, ctx.stability);
 }
