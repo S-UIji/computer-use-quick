@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.log
+test/bench/out/
+.scratch/
+.claude/
+.agents/
+openspec/
