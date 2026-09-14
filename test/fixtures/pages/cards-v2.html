@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>部门卡片 v2</title></head>
+<body>
+  <main>
+    <h1>组织一览</h1>
+    <div id="wall">
+      <div class="row">
+        <div class="dept-block">
+          <div class="dept-name">教育事业群</div>
+          <button type="button">查看在岗干部明细</button>
+          <span>总人数 5081 人</span>
+        </div>
+      </div>
+      <div class="row">
+        <div class="dept-block">
+          <div class="dept-name">技术平台中心</div>
+          <button type="button">查看在岗干部明细</button>
+          <span>总人数 0 人</span>
+        </div>
+      </div>
+    </div>
+    <p id="clicked">未点击</p>
+  </main>
+  <script>
+    document.querySelectorAll(".dept-block button").forEach(function (b) {
+      b.addEventListener("click", function (e) {
+        var name = e.target.closest(".dept-block").querySelector(".dept-name").textContent;
+        document.getElementById("clicked").textContent = name + " · " + e.target.textContent;
+      });
+    });
+  </script>
+</body></html>

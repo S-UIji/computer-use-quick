@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>同名按钮表格</title></head>
+<body>
+  <main>
+    <h1>订单管理</h1>
+    <table>
+      <thead><tr><th>单号</th><th>金额</th><th>操作</th></tr></thead>
+      <tbody>
+        <tr><td>ORD20260911</td><td>100</td><td><button type="button">删除</button></td></tr>
+        <tr><td>ORD20260912</td><td>200</td><td><button type="button">删除</button></td></tr>
+        <tr><td>ORD20260913</td><td>300</td><td><button type="button">删除</button></td></tr>
+      </tbody>
+    </table>
+    <p id="deleted">未删除</p>
+  </main>
+  <script>
+    document.querySelectorAll("tbody button").forEach((b) => {
+      b.addEventListener("click", (e) => {
+        const id = e.target.closest("tr").querySelector("td").textContent;
+        document.getElementById("deleted").textContent = `已删除 ${id}`;
+      });
+    });
+  </script>
+</body></html>

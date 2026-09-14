@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>同构列表</title></head>
+<body>
+  <main>
+    <h1>人员列表</h1>
+    <div id="rows"></div>
+  </main>
+  <script>
+    const rows = document.getElementById("rows");
+    for (let i = 1; i <= 20; i++) {
+      const d = document.createElement("div");
+      d.innerHTML =
+        `<span class="nm">员工${i}</span>` +
+        `<button type="button">查看详情</button>` +
+        `<button type="button">编辑</button>`;
+      rows.appendChild(d);
+    }
+  </script>
+</body></html>
