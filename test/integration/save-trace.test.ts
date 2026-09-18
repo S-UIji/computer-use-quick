@@ -96,4 +96,48 @@ describe("descriptor 固化", () => {
     });
     expect(again.ok).toBe(true);
   });
+
+  it("assert 步骤的 ref 也会被固化成 descriptor", async () => {
+    const handle = await session.getPage();
+    await handle.page.goto(`${fx.url}/form.html`, { waitUntil: "load" });
+    const snap = await takeSnapshot(handle);
+    const ref = snap.text.split("\n").find((l) => l.includes('"登录"'))!.match(/\[(e\d+)\]/)![1];
+
+    const r = await runBatch({
+      handle, tracker, collector, refs: snap.refs, vars: {},
+      steps: [{ action: "assert", type: "visible", target: { ref } }]
+    });
+
+    expect(r.ok).toBe(true);
+    const captured = r.capturedSteps[0] as { target: { descriptor?: unknown } };
+    expect(captured.target.descriptor).toBeDefined();
+  });
+
+  it("无法固化的步骤不进 capturedSteps，save_trace 不再被整体拒绝", async () => {
+    const handle = await session.getPage();
+    await handle.page.goto(`${fx.url}/form.html`, { waitUntil: "load" });
+    const snap = await takeSnapshot(handle);
+    const ref = snap.text.split("\n").find((l) => l.includes('"登录"'))!.match(/\[(e\d+)\]/)![1];
+
+    const r = await runBatch({
+      handle, tracker, collector, refs: snap.refs, vars: {},
+      steps: [
+        // hidden 断言的目标不存在：断言通过，但元素不在，固化无从谈起
+        { action: "assert", type: "hidden", target: { ref: "e99" } },
+        { action: "click", target: { ref } }
+      ]
+    });
+
+    expect(r.ok).toBe(true);
+    expect(r.capturedSteps).toHaveLength(1);
+    expect(r.results[0].error).toContain("固化");
+
+    // 剩余步骤可以正常保存，不会被带 ref 的步骤连坐
+    const path = await saveTrace(dir, {
+      name: "skip-uncaptured", baseUrl: fx.url,
+      createdAt: new Date().toISOString(), steps: r.capturedSteps
+    });
+    const loaded = await loadTrace(path);
+    expect(JSON.stringify(loaded.steps)).not.toContain('"ref"');
+  });
 });

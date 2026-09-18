@@ -37,6 +37,10 @@ export async function runAssert(ctx: ActionContext, step: AssertStep): Promise<v
   } catch {
     backendNodeId = null;
   }
+  // assert 不走 runAction，自己要触发固化回调，否则带 ref 的断言步进不了 trace。
+  // 断言不改页面，此刻固化是安全的；hidden 断言目标不存在时跳过固化，
+  // 由 batch 决定这一步不进 capturedSteps
+  if (backendNodeId !== null) await ctx.onResolved?.(backendNodeId);
 
   const visible = await (async (): Promise<boolean> => {
     if (backendNodeId === null) return false;

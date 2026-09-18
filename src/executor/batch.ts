@@ -93,7 +93,7 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
             // 不能因为拿不到 descriptor 就把一个已经成功的动作判成失败。
             notes.push(
               `ref「${refName}」固化成 descriptor 失败（${err instanceof Error ? err.message : String(err)}）：` +
-              `这一步不会进 trace，save_trace 时会提示需要重新探索`
+              `这一步不会进 trace，如需回放请重新探索这一步`
             );
           }
         };
@@ -105,7 +105,18 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
         await runAction(ctx, step);
       }
       ctx.onResolved = undefined;
-      capturedSteps.push(captured);
+      if (
+        opts.captureDescriptors !== false && refName !== undefined && captured === step
+      ) {
+        // 带 ref 的步骤没固化成功（固化抛错，或像 assert hidden 一样目标已不存在、
+        // 根本没机会固化）。它进 trace 会让 save_trace 整体拒绝且本 session 无法恢复，
+        // 所以按告警所说跳过它——跑得通比能回放重要。
+        if (!notes.length) {
+          notes.push(`ref「${refName}」未固化成 descriptor：这一步不会进 trace`);
+        }
+      } else {
+        capturedSteps.push(captured);
+      }
 
       results.push({
         index: i,

@@ -77,4 +77,18 @@ describe("buildDescriptor", () => {
     });
     expect((result as { value: number }).value).toBe(0);
   });
+
+  it("StaticText（底层是 text 节点）也能固化成 descriptor", async () => {
+    const h = await open("static-text.html");
+    const snap = await takeSnapshot(h);
+    const line = snap.text.split("\n").find((l) => l.includes("独立静态文本节点"))!;
+    const ref = line.match(/\[(e\d+)\]/)![1];
+
+    const d = await buildDescriptor(h, snap.refs.get(ref)!);
+    const kinds = d.strategies.map((s) => s.kind);
+    expect(kinds).toContain("text");
+    expect(kinds[kinds.length - 1]).toBe("xpath");
+    const text = d.strategies.find((s) => s.kind === "text") as { text: string };
+    expect(text.text).toContain("独立静态文本节点");
+  });
 });

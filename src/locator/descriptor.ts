@@ -13,7 +13,10 @@ interface DomInfo {
 }
 
 const DOM_INFO_FN = `function () {
-  var el = this;
+  // StaticText 等 a11y 节点的 backendDOMNodeId 指向 text 节点，
+  // 没有 tagName/classList，向上取宿主元素
+  var el = this.nodeType === 1 ? this : this.parentElement;
+  if (!el) return null;
   function isStableClass(c) {
     // 过滤掉 CSS-in-JS / 构建期生成的随机类名（含连续数字或看起来像 hash）
     return c.length > 1 && !/\\d{3,}/.test(c) && !/^[a-z]+-[a-z0-9]{5,}$/i.test(c);
@@ -48,8 +51,11 @@ async function domInfo(handle: PageHandle, backendNodeId: number): Promise<DomIn
     objectId: object.objectId,
     functionDeclaration: DOM_INFO_FN,
     returnByValue: true
-  })) as { result: { value: DomInfo } };
+  })) as { result: { value: DomInfo | null } };
   await handle.cdp.send("Runtime.releaseObject", { objectId: object.objectId }).catch(() => {});
+  // 页内函数抛异常（或节点没有宿主元素）时 value 是 undefined/null，
+  // 不在这里拦住，调用方拿到的是 "reading 'testId'" 之类不知所云的错误
+  if (!result.value) throw new Error("目标节点没有可用的 DOM 元素，无法生成 descriptor");
   return result.value;
 }
 
