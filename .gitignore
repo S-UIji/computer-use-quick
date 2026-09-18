@@ -6,4 +6,5 @@ test/bench/out/
 .scratch/
 .claude/
 .agents/
+.codegraph/
 openspec/
