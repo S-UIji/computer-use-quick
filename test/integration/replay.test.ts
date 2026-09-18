@@ -87,6 +87,16 @@ describe("replayTrace", () => {
     expect(slow.steps.some((s) => s.action === "sleep")).toBe(false);
   });
 
+  it("slowMoMs 下 trace 自带的 sleep 仍按真实序号留在台账里", async () => {
+    const t = loginTrace(fx.url);
+    t.steps.splice(1, 0, { action: "sleep", ms: 10 });
+    const rec = await run(t, { USER: "a", PWD: "b" }, 50);
+    expect(rec.ok).toBe(true);
+    expect(rec.steps.map((s) => s.index)).toEqual([0, 1, 2, 3, 4, 5]);
+    const sleepStep = rec.steps.find((s) => s.action === "sleep");
+    expect(sleepStep?.index).toBe(1);
+  });
+
   it("回放一条 5 步用例，全程零模型往返（记录基线数字）", async () => {
     const rec = await run(loginTrace(fx.url), { USER: "a", PWD: "b" });
     // 同样 5 步若每步一次 agent turn，按每 turn 3s 保守计需要约 15s

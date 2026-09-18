@@ -39,12 +39,14 @@ npm run build
 }
 ```
 
-## 五个工具
+## 工具
 
 | 工具 | 什么时候用 |
 |---|---|
 | `snapshot` | 看当前页面有什么。替代截图。结构相同的兄弟节点会折叠，用 `expand` 展开 |
 | `batch` | 执行一串动作。**不要一次只传一步**——那样就退回到慢的老路了 |
+| `list_pages` | 列出所有标签页的 pageId。点了会开新标签的链接后用 |
+| `discard_steps` | 探索走了弯路时，丢弃已记录的步骤（最近 N 步或全部），再 `save_trace` |
 | `save_trace` | 探索完，把成功的步骤固化成可回放用例 |
 | `replay` | 跑已有用例。CI 回归用这个，全程不调模型 |
 | `inspect` | 只在排查失败时用。取截图/console/网络 |
@@ -111,6 +113,9 @@ npm run bench -- ./traces/smoke-login.json
 - 串行单浏览器，多用例并行在二期。
 - **隐式等待检测不到纯 `setTimeout` 触发的更新**——那种情况页面上不存在任何在途信号，
   必须用显式 `wait`。带网络请求的异步更新则能正常等到。
+- 隐式等待的网络在途信号只统计 XHR/Fetch/Document/Script/Stylesheet，
+  信标/图片类请求不拖住等待；单个请求超过 10s 视为长轮询或僵尸，不再阻塞。
+  打满 timeoutMs 上限的步骤会在结果里带告警。
 - `wait` 的 `response` 条件用「网络静默」近似，不做 urlPattern 精确匹配。
 - iframe：支持同进程 iframe 的感知、css/role-name 定位与操作；跨进程 iframe（OOPIF）不支持。
 - iframe 内**不支持容器锚定和文本策略**——这两者依赖在主 frame 执行 JS 打标记，

@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist-bench",
+    "rootDir": "."
+  },
+  "include": ["src", "test/bench"]
+}

@@ -59,6 +59,18 @@ async function runModeB(o: BenchOptions): Promise<number> {
   return Date.now() - t0;
 }
 
+/**
+ * 每轮之间把站点存储清掉。trace 假定从登出态开始，而一轮跑完浏览器是登录态，
+ * 不清理的话下一轮 navigate 会被重定向进主页、登录步骤全部落空（实测）。
+ */
+async function resetSiteState(o: BenchOptions): Promise<void> {
+  await o.handle.page.goto(o.trace.baseUrl, { waitUntil: "load" });
+  await o.handle.page.evaluate(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+}
+
 export async function runBench(o: BenchOptions): Promise<BenchReport> {
   const rounds = o.rounds ?? 5;
   const steps = o.trace.steps.length;
@@ -66,10 +78,15 @@ export async function runBench(o: BenchOptions): Promise<BenchReport> {
   const bTimes: number[] = [];
   const cTimes: number[] = [];
   for (let i = 0; i < rounds; i++) {
+    await resetSiteState(o);
     bTimes.push(await runModeB(o));
+    await resetSiteState(o);
     const rec = await replayTrace({ ...o });
     if (!rec.ok) {
-      throw new Error(`基准测试的 C 模式回放失败：${rec.failure?.kind} ${rec.failure?.message}`);
+      throw new Error(
+        `基准测试的 C 模式回放失败（第 ${(rec.failure?.failedIndex ?? 0) + 1} 步）：` +
+        `${rec.failure?.kind} ${rec.failure?.message}`
+      );
     }
     cTimes.push(rec.durationMs);
   }

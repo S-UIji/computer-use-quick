@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist-bench/
 *.log
 test/bench/out/
 .scratch/
