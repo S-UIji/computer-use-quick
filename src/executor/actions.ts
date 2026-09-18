@@ -59,9 +59,43 @@ async function bringToFront(handle: PageHandle): Promise<void> {
 /**
  * 经 CDP Input 域派发真实鼠标事件（spec §2.1）。这里派发的是浏览器级
  * trusted event，前端 JS 分辨不出来；但不做鼠标轨迹动画和人类化延迟。
+ *
+ * CDP Input 事件按屏幕坐标派发，但目标元素可能被 CSS 隐藏（opacity:0、
+ * 用伪元素/覆盖 div 替代视觉呈现等），导致事件落在覆盖物而非目标元素上。
+ * 典型场景：百度搜索按钮 —— 原生 `<input type="submit">` 被 CSS 隐藏，
+ * 视觉位置被一个 div 覆盖，CDP click 打到 div 上无法触发表单提交。
+ *
+ * 修复：派发前做 hit-test（elementFromPoint）。若目标元素不在坐标位置，
+ * 在 CDP 鼠标事件链之后补一个 JS dispatchEvent('click') 直达目标元素。
+ * CDP 事件保证了 hover/focus/mousedown/mouseup 链是 trusted；JS click
+ * 保证 DOM click 事件命中正确的元素。
  */
 async function realClick(handle: PageHandle, backendNodeId: number): Promise<void> {
   const { x, y } = await centerOf(handle, backendNodeId);
+
+  // hit-test：检查目标元素是否在点击坐标的可视位置
+  const { object: hitObj } = await handle.cdp.send("DOM.resolveNode", { backendNodeId });
+  const { result: hitResult } = (await handle.cdp.send("Runtime.callFunctionOn", {
+    objectId: hitObj.objectId,
+    functionDeclaration: `function(cx, cy) {
+      const el = document.elementFromPoint(cx, cy);
+      if (!el) return false;
+      if (el === this) return true;
+      // 检查 this 是否包含 el（el 是 this 的子节点，例如点击在按钮内的文本节点上）
+      if (this.contains(el)) return true;
+      // 检查 el 是否是 this 的容器（this 被包裹在 el 内）
+      if (el.contains(this)) return true;
+      return false;
+    }`,
+    arguments: [{ value: x }, { value: y }],
+    returnByValue: true
+  })) as { result: { value: boolean } };
+  if (hitObj.objectId) {
+    await handle.cdp.send("Runtime.releaseObject", { objectId: hitObj.objectId }).catch(() => {});
+  }
+
+  const hitTarget = hitResult.value;
+
   await handle.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
   await handle.cdp.send("Input.dispatchMouseEvent", {
     type: "mousePressed", x, y, button: "left", clickCount: 1
@@ -69,6 +103,28 @@ async function realClick(handle: PageHandle, backendNodeId: number): Promise<voi
   await handle.cdp.send("Input.dispatchMouseEvent", {
     type: "mouseReleased", x, y, button: "left", clickCount: 1
   });
+
+  if (!hitTarget) {
+    // 目标元素被覆盖/隐藏：CDP 鼠标事件打在了错误元素上。
+    // 补一个 JS click 事件直达目标，避免对 checkbox 等控件用 .click()
+    // （.click() 会额外生成 mousedown/mouseup，造成双击副作用）。
+    const { object: fixObj } = await handle.cdp.send("DOM.resolveNode", { backendNodeId });
+    await handle.cdp.send("Runtime.callFunctionOn", {
+      objectId: fixObj.objectId,
+      functionDeclaration: `function(cx, cy) {
+        this.dispatchEvent(new MouseEvent('click', {
+          bubbles: true, cancelable: true,
+          clientX: cx, clientY: cy, screenX: cx, screenY: cy,
+          button: 0, buttons: 0, view: window
+        }));
+      }`,
+      arguments: [{ value: x }, { value: y }],
+      returnByValue: true
+    });
+    if (fixObj.objectId) {
+      await handle.cdp.send("Runtime.releaseObject", { objectId: fixObj.objectId }).catch(() => {});
+    }
+  }
 }
 
 async function readProperty(
