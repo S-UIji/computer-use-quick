@@ -18,6 +18,9 @@ export async function startFixtureServer(port = 0) {
       return;
     }
 
+    // 永不返回的接口：验证在途请求的导航清场与僵尸驱逐
+    if (path === "/api/hang") return;
+
     const name = normalize(decodeURIComponent(path)).replace(/^([/\\])+/, "");
     if (!name.endsWith(".html") || name.includes("..")) {
       res.writeHead(404).end("not found");

@@ -11,6 +11,10 @@ export interface ActionContext {
   vars: Record<string, string>;
   /** 最近一次 target 解析的结果，供 batch 记录 strategyIndex 与固化 descriptor */
   lastResolve?: ResolveResult;
+  /** 最近一次动作后的隐式等待是否打满了超时上限，供 batch 显形成告警 */
+  lastWaitTimedOut?: boolean;
+  /** 目标解析的轮询重试预算（ms），由 batch 注入；ref 直查不受影响 */
+  resolveRetryMs?: number;
   /** 隐式稳定性等待参数，batch 可整体覆盖（默认值见 waitStable） */
   stability?: StabilityOptions;
   /**
@@ -37,7 +41,9 @@ async function nodeIdFor(
   target: TargetRef,
   opts: ResolveOptions = {}
 ): Promise<number> {
-  const r = await resolveTarget(ctx.handle, target, ctx.refs, opts);
+  const r = await resolveTarget(ctx.handle, target, ctx.refs, {
+    ...opts, retryMs: ctx.resolveRetryMs
+  });
   ctx.lastResolve = r;
   await ctx.onResolved?.(r.backendNodeId);
   return r.backendNodeId;
@@ -150,7 +156,11 @@ export async function runAction(ctx: ActionContext, step: Step): Promise<void> {
   switch (step.action) {
     case "navigate": {
       await handle.cdp.send("Page.enable");
-      await handle.cdp.send("Page.navigate", { url: step.url });
+      // Page.navigate 不抛异常，导航失败（DNS/证书/连接拒绝）通过 errorText 返回
+      const { errorText } = (await handle.cdp.send("Page.navigate", { url: step.url })) as {
+        errorText?: string;
+      };
+      if (errorText) throw new Error(`导航失败：${errorText}（${step.url}）`);
       await new Promise((r) => setTimeout(r, 100));
       break;
     }
@@ -251,5 +261,5 @@ export async function runAction(ctx: ActionContext, step: Step): Promise<void> {
   }
 
   // 除 wait/sleep/extract 外，每个动作后自动隐式等待（spec §7.2）
-  await waitStable(handle, tracker, ctx.stability);
+  ctx.lastWaitTimedOut = await waitStable(handle, tracker, ctx.stability);
 }

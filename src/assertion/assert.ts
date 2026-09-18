@@ -33,7 +33,9 @@ export async function runAssert(ctx: ActionContext, step: AssertStep): Promise<v
 
   let backendNodeId: number | null = null;
   try {
-    backendNodeId = (await resolveTarget(handle, step.target, ctx.refs)).backendNodeId;
+    // hidden 断言不重试：目标不存在本就是它要断言的结果，白等一个重试预算纯属浪费
+    const retryMs = step.type === "hidden" ? 0 : ctx.resolveRetryMs;
+    backendNodeId = (await resolveTarget(handle, step.target, ctx.refs, { retryMs })).backendNodeId;
   } catch {
     backendNodeId = null;
   }

@@ -21,6 +21,8 @@ export interface BatchOptions {
   captureDescriptors?: boolean;
   /** 隐式稳定性等待参数，覆盖 waitStable 的默认值 */
   stability?: StabilityOptions;
+  /** 目标解析的轮询重试预算（ms），默认 3000；传 0 恢复一次性解析 */
+  resolveRetryMs?: number;
 }
 
 export interface BatchResult {
@@ -60,7 +62,8 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
     tracker: opts.tracker,
     refs: opts.refs,
     vars: { ...opts.vars },
-    stability: opts.stability
+    stability: opts.stability,
+    resolveRetryMs: opts.resolveRetryMs ?? 3000
   };
 
   const results: StepResult[] = [];
@@ -71,6 +74,7 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
     const t0 = Date.now();
     const notes: string[] = [];
     ctx.onResolved = undefined;
+    ctx.lastWaitTimedOut = undefined;
 
     try {
       const step = interpolateStep(raw, ctx.vars);
@@ -105,6 +109,15 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
         await runAction(ctx, step);
       }
       ctx.onResolved = undefined;
+      if (ctx.lastWaitTimedOut) {
+        // 打满上限不抛错是设计（等不到静默不耽误干活），但这笔开销必须显形——
+        // 否则持续流量页面上每一步都在静默地白付整个 timeout
+        notes.push(
+          `隐式等待打满 ${ctx.stability?.timeoutMs ?? 5000}ms 上限：页面有持续的接口请求或 DOM 变更，` +
+          `可考虑调小 stability.timeoutMs 或为该步改用显式 wait`
+        );
+        ctx.lastWaitTimedOut = undefined;
+      }
       if (
         opts.captureDescriptors !== false && refName !== undefined && captured === step
       ) {
