@@ -106,4 +106,35 @@ describe("runAction", () => {
     });
     expect((result as { value: boolean }).value).toBe(true);
   });
+
+  it("被覆盖的 submit 按钮能通过 click 触发表单提交", async () => {
+    // 复刻百度搜索表单：原生 submit 被 CSS 隐藏（opacity:0），
+    // 视觉位置由覆盖 div 替代。CDP 鼠标事件打在覆盖 div 上无法触发提交，
+    // hit-test 检测到遮挡后补一个 JS dispatchEvent('click') 直达按钮。
+    const ctx = await ctxFor("hidden-submit.html");
+    await runAction(ctx, { action: "click", target: css("#su") });
+    expect(await textOf(ctx, "#submit-count")).toBe("1");
+  });
+
+  it("被覆盖的 submit 按钮连点两次，submit 事件触发两次", async () => {
+    const ctx = await ctxFor("hidden-submit.html");
+    await runAction(ctx, { action: "click", target: css("#su") });
+    await runAction(ctx, { action: "click", target: css("#su") });
+    expect(await textOf(ctx, "#submit-count")).toBe("2");
+  });
+
+  it("被覆盖的 submit 按钮点击后 checkbox 不会被双击", async () => {
+    // 同一页面上有一个可见 checkbox，点击隐藏 submit 后检查 checkbox 的
+    // change 计数是否仍为 0（未被误触发），验证 JS dispatchEvent('click')
+    // 不会产生双击副作用。
+    const ctx = await ctxFor("hidden-submit.html");
+    await runAction(ctx, { action: "click", target: css("#su") });
+    expect(await textOf(ctx, "#change-count")).toBe("0");
+  });
+
+  it("hidden-submit 页面上的可见 checkbox 点击只 toggle 一次", async () => {
+    const ctx = await ctxFor("hidden-submit.html");
+    await runAction(ctx, { action: "click", target: css("#agree") });
+    expect(await textOf(ctx, "#change-count")).toBe("1");
+  });
 });
