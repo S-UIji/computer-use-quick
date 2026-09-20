@@ -46,17 +46,18 @@ describe("runBench", () => {
     expect(r.turnsC).toBe(1);
   });
 
-  it("实测出 B 和 C 的中位耗时，且报告含三行对照与待填的 A", async () => {
+  it("实测出 A、B 和 C 的中位耗时，且报告含三行对照", async () => {
     const r = await runBench({
       handle: await session.getPage(), tracker, collector,
       trace: trace(fx.url), vars: {}, rounds: 2
     });
+    expect(r.medianAMs).toBeGreaterThan(0);
     expect(r.medianBMs).toBeGreaterThan(0);
     expect(r.medianCMs).toBeGreaterThan(0);
     expect(r.markdown).toContain("| A ");
     expect(r.markdown).toContain("| B ");
     expect(r.markdown).toContain("| C ");
-    expect(r.markdown).toContain("待人工填写");
+    expect(r.markdown).not.toContain("待人工填写");
     console.log("\n" + r.markdown + "\n");
   });
 });
