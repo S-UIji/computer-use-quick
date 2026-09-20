@@ -103,8 +103,8 @@ run-record 里会出**漂移告警**——回放不算失败，但这是页面�
 npm run bench -- ./traces/smoke-login.json
 ```
 
-输出 A/B/C 三种方式的 turn 数与耗时对照。A（现状：每步一次模型往返）的耗时
-脚本测不了，需要用现状链路手动跑一次同样的用例填进去。
+自动输出 A/B/C 三种方式的 turn 数与实测工具耗时对照。模型思考时间未计入——
+实际提速取决于模型往返速度（设计文档估算 3-10s/turn）。
 
 ## 已知边界（一期）
 
@@ -121,11 +121,14 @@ npm run bench -- ./traces/smoke-login.json
 - iframe 内**不支持容器锚定和文本策略**——这两者依赖在主 frame 执行 JS 打标记，
   够不到子文档。iframe 内请用 css 或 role-name。
 - `xpath` 兜底策略是全文档搜索，对 iframe 内元素理论上可能误命中主文档的同结构元素。
+- **click 对被 CSS 隐藏/覆盖的元素自动兜底**：先做 hit-test（`elementFromPoint`），
+  若目标元素不在点击坐标（被覆盖 div 替代或 `opacity:0` 隐藏），在 CDP 鼠标事件之后
+  补一个 `dispatchEvent(MouseEvent('click'))` 直达目标元素，避免双击副作用。
 
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（25 个文件 / 162 个测试）
+npm test                  # 先 tsc 构建再跑全部（26 个文件 / 185 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```
