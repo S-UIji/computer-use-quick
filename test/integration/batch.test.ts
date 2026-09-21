@@ -130,6 +130,73 @@ describe("runBatch", () => {
     expect(r.results[1].error).toContain("sleep");
   });
 
+  it("隐式等待打满上限时在结果里显形", async () => {
+    const handle = await session.getPage();
+    await runBatch({ handle, tracker, collector, refs: new Map(), vars: {},
+      steps: [{ action: "navigate", url: `${fx.url}/form.html` }] });
+    await handle.cdp.send("Runtime.evaluate", {
+      expression: `window.__poll = setInterval(function () {
+        fetch("/api/orders").catch(function () {});
+      }, 100)`
+    });
+    try {
+      const r = await runBatch({ handle, tracker, collector, refs: new Map(), vars: {},
+        stability: { timeoutMs: 1000 },
+        steps: [{ action: "click", target: css("#submit") }] });
+      expect(r.ok).toBe(true);
+      expect(r.results[0].durationMs).toBeGreaterThanOrEqual(900);
+      expect(r.results[0].error).toContain("持续");
+    } finally {
+      await handle.cdp.send("Runtime.evaluate", { expression: `clearInterval(window.__poll)` });
+    }
+  });
+
+  it("目标延迟出现时解析会轮询重试，不再一次性判负", async () => {
+    const handle = await session.getPage();
+    await runBatch({ handle, tracker, collector, refs: new Map(), vars: {},
+      steps: [{ action: "navigate", url: `${fx.url}/form.html` }] });
+    // 600ms 后才插入按钮，模拟「上一步条件已满足、但 DOM 还没渲染完」的竞态
+    await handle.cdp.send("Runtime.evaluate", {
+      expression: `setTimeout(function () {
+        var b = document.createElement("button");
+        b.id = "late-btn"; b.textContent = "晚到按钮";
+        document.body.appendChild(b);
+      }, 600)`
+    });
+
+    const t0 = Date.now();
+    const r = await runBatch({ handle, tracker, collector, refs: new Map(), vars: {},
+      resolveRetryMs: 2000,
+      steps: [{ action: "click", target: css("#late-btn") }] });
+    const elapsed = Date.now() - t0;
+
+    expect(r.ok).toBe(true);
+    expect(elapsed).toBeGreaterThanOrEqual(500);
+  });
+
+  it("resolveRetryMs=0 时保持一次性解析：目标不存在立即判负", async () => {
+    const handle = await session.getPage();
+    await runBatch({ handle, tracker, collector, refs: new Map(), vars: {},
+      steps: [{ action: "navigate", url: `${fx.url}/form.html` }] });
+
+    const t0 = Date.now();
+    const r = await runBatch({ handle, tracker, collector, refs: new Map(), vars: {},
+      resolveRetryMs: 0,
+      steps: [{ action: "click", target: css("#never-exists") }] });
+
+    expect(r.ok).toBe(false);
+    expect(r.failure?.kind).toBe("target-not-found");
+    expect(Date.now() - t0).toBeLessThan(1500);
+  });
+
+  it("navigate 到不可达地址：判负 navigation-failed，不显示假成功", async () => {
+    const r = await run([
+      { action: "navigate", url: "http://127.0.0.1:1/unreachable" }
+    ]);
+    expect(r.ok).toBe(false);
+    expect(r.failure?.kind).toBe("navigation-failed");
+  });
+
   it("成功后 refs 被刷新为执行后快照的 ref 表", async () => {
     const handle = await session.getPage();
     const refs = new Map<string, number>();

@@ -12,6 +12,8 @@ export interface ReplayOptions {
   vars: Record<string, string>;
   /** 每步之间的额外延迟，用于演示场景让人看得见操作。默认 0。 */
   slowMoMs?: number;
+  /** 目标解析的轮询重试预算（ms），默认 3000；传 0 恢复一次性解析 */
+  resolveRetryMs?: number;
 }
 
 /** 把 trace 里的相对 url 补全成绝对地址 */
@@ -34,9 +36,18 @@ export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
   const steps = opts.trace.steps.map((s) => absolutize(s, opts.trace.baseUrl));
   const slowMo = opts.slowMoMs ?? 0;
 
-  const withSlowMo: Step[] = slowMo > 0
-    ? steps.flatMap((s, i) => (i === 0 ? [s] : [{ action: "sleep", ms: slowMo } as Step, s]))
-    : steps;
+  // realIndex[k] = withSlowMo 第 k 步在 trace 里的真实序号；-1 表示是 slowMo 插入的 sleep。
+  // 不能靠 action==="sleep" 过滤台账——trace 自己也可能有 sleep 步，会被误删、序号也会错位。
+  const withSlowMo: Step[] = [];
+  const realIndex: number[] = [];
+  steps.forEach((s, i) => {
+    if (slowMo > 0 && i > 0) {
+      withSlowMo.push({ action: "sleep", ms: slowMo });
+      realIndex.push(-1);
+    }
+    withSlowMo.push(s);
+    realIndex.push(i);
+  });
 
   const r = await runBatch({
     handle: opts.handle,
@@ -45,13 +56,14 @@ export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
     refs: new Map(),
     vars: opts.vars,
     steps: withSlowMo,
-    captureDescriptors: false
+    captureDescriptors: false,
+    resolveRetryMs: opts.resolveRetryMs
   });
 
-  // slowMo 插入的 sleep 步骤不该出现在台账里，去掉并重排序号
-  const realResults = slowMo > 0
-    ? r.results.filter((s) => s.action !== "sleep").map((s, i) => ({ ...s, index: i }))
-    : r.results;
+  // 去掉 slowMo 插入的 sleep，序号换算回真实步序号
+  const realResults = r.results
+    .filter((s) => realIndex[s.index] !== -1)
+    .map((s) => ({ ...s, index: realIndex[s.index] }));
 
   const drifts: RunRecord["drifts"] = [];
   for (const s of realResults) {
@@ -62,9 +74,9 @@ export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
     if (expected && actual) drifts.push({ index: s.index, expected, actual });
   }
 
-  // 失败上下文里的步序号也要按真实步计（slowMo 会撑大 runBatch 的序号）
-  const failure = r.failure && slowMo > 0
-    ? { ...r.failure, failedIndex: Math.floor(r.failure.failedIndex / 2) }
+  // 失败上下文里的步序号同样换算回真实步序号
+  const failure = r.failure
+    ? { ...r.failure, failedIndex: realIndex[r.failure.failedIndex] }
     : r.failure;
 
   return {

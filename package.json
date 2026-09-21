@@ -10,7 +10,7 @@
     "test": "tsc && vitest run",
     "test:unit": "vitest run test/unit",
     "test:integration": "tsc && vitest run test/integration",
-    "bench": "node --experimental-strip-types test/bench/cli.ts"
+    "bench": "tsc -p tsconfig.bench.json && node dist-bench/test/bench/cli.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

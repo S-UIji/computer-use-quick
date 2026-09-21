@@ -1,0 +1,192 @@
+{
+  "name": "smoke-login",
+  "baseUrl": "http://localhost:3040",
+  "createdAt": "2026-09-18T06:50:16.599Z",
+  "steps": [
+    {
+      "action": "navigate",
+      "url": "http://localhost:3040"
+    },
+    {
+      "action": "fill",
+      "target": {
+        "descriptor": {
+          "strategies": [
+            {
+              "kind": "role-name",
+              "role": "textbox",
+              "name": "请输入账号（开发环境，如 admin）"
+            },
+            {
+              "kind": "css",
+              "value": "#el-id-1518-1"
+            },
+            {
+              "kind": "xpath",
+              "value": "//*[@id=\"el-id-1518-1\"]"
+            }
+          ],
+          "framePath": []
+        }
+      },
+      "value": "admin"
+    },
+    {
+      "action": "click",
+      "target": {
+        "descriptor": {
+          "strategies": [
+            {
+              "kind": "role-name",
+              "role": "button",
+              "name": "登 录"
+            },
+            {
+              "kind": "text",
+              "tag": "button",
+              "text": "登 录"
+            },
+            {
+              "kind": "css",
+              "value": "button.el-button--primary.el-button--large.login-btn"
+            },
+            {
+              "kind": "xpath",
+              "value": "/html/body[1]/div[1]/div[1]/div[1]/div[1]/form[1]/button[1]"
+            }
+          ],
+          "framePath": []
+        }
+      }
+    },
+    {
+      "action": "assert",
+      "type": "visible",
+      "target": {
+        "descriptor": {
+          "strategies": [
+            {
+              "kind": "role-name",
+              "role": "button",
+              "name": "退出登录"
+            },
+            {
+              "kind": "text",
+              "tag": "button",
+              "text": "退出"
+            },
+            {
+              "kind": "css",
+              "value": "button.el-button--small.is-text"
+            },
+            {
+              "kind": "xpath",
+              "value": "/html/body[1]/div[1]/div[1]/header[1]/div[1]/button[1]"
+            }
+          ],
+          "framePath": []
+        }
+      }
+    },
+    {
+      "action": "click",
+      "target": {
+        "descriptor": {
+          "strategies": [
+            {
+              "kind": "container-role-name",
+              "containerText": "教育事业群",
+              "role": "button",
+              "name": "查看在岗干部明细"
+            }
+          ],
+          "framePath": []
+        }
+      }
+    },
+    {
+      "action": "assert",
+      "type": "visible",
+      "target": {
+        "descriptor": {
+          "strategies": [
+            {
+              "kind": "role-name",
+              "role": "dialog",
+              "name": "教育事业群 — 干部明细"
+            }
+          ],
+          "framePath": []
+        }
+      }
+    },
+    {
+      "action": "click",
+      "target": {
+        "descriptor": {
+          "strategies": [
+            {
+              "kind": "role-name",
+              "role": "button",
+              "name": "Close this dialog"
+            }
+          ],
+          "framePath": []
+        }
+      }
+    },
+    {
+      "action": "wait",
+      "until": {
+        "type": "hidden",
+        "target": {
+          "descriptor": {
+            "strategies": [
+              {
+                "kind": "role-name",
+                "role": "dialog",
+                "name": "教育事业群 — 干部明细"
+              }
+            ],
+            "framePath": []
+          }
+        }
+      }
+    },
+    {
+      "action": "click",
+      "target": {
+        "descriptor": {
+          "strategies": [
+            {
+              "kind": "role-name",
+              "role": "link",
+              "name": "部门管理"
+            }
+          ],
+          "framePath": []
+        }
+      }
+    },
+    {
+      "action": "wait",
+      "until": { "type": "url-contains", "value": "dept" }
+    },
+    {
+      "action": "fill",
+      "target": {
+        "descriptor": {
+          "strategies": [
+            {
+              "kind": "role-name",
+              "role": "textbox",
+              "name": "搜索部门名称 / 编码"
+            }
+          ],
+          "framePath": []
+        }
+      },
+      "value": "教育事业群"
+    }
+  ]
+}

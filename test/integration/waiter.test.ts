@@ -75,6 +75,52 @@ describe("waitStable", () => {
     expect(elapsed).toBeLessThan(2500);
     await h.cdp.send("Runtime.evaluate", { expression: `clearInterval(window.__spin)` });
   });
+
+  it("信标/图片类请求不计入在途信号，不再拖住隐式等待", async () => {
+    const h = await open("form.html");
+    await h.cdp.send("Runtime.evaluate", {
+      expression: `window.__beacon = setInterval(function () {
+        (new Image()).src = "/beacon?" + Math.random();
+      }, 50)`
+    });
+    const t0 = Date.now();
+    const timedOut = await waitStable(h, tracker, { timeoutMs: 1500 });
+    const elapsed = Date.now() - t0;
+    expect(timedOut).toBe(false);
+    expect(elapsed).toBeLessThan(1500);
+    await h.cdp.send("Runtime.evaluate", { expression: `clearInterval(window.__beacon)` });
+  });
+
+  it("持续 XHR 轮询仍计入在途信号：打满超时并返回 timedOut=true", async () => {
+    const h = await open("form.html");
+    await h.cdp.send("Runtime.evaluate", {
+      expression: `window.__poll = setInterval(function () {
+        fetch("/api/orders").catch(function () {});
+      }, 100)`
+    });
+    const t0 = Date.now();
+    const timedOut = await waitStable(h, tracker, { timeoutMs: 1200 });
+    const elapsed = Date.now() - t0;
+    expect(timedOut).toBe(true);
+    expect(elapsed).toBeGreaterThanOrEqual(1100);
+    expect(elapsed).toBeLessThan(2500);
+    await h.cdp.send("Runtime.evaluate", { expression: `clearInterval(window.__poll)` });
+  });
+
+  it("主 frame 导航后，上一页面遗留的在途请求不再阻塞隐式等待", async () => {
+    const h = await open("form.html");
+    await h.cdp.send("Runtime.evaluate", {
+      expression: `fetch("/api/hang").catch(function () {})`
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(tracker.inFlight()).toBe(1);
+
+    await h.page.goto(`${fx.url}/async-list.html`, { waitUntil: "load" });
+    const t0 = Date.now();
+    const timedOut = await waitStable(h, tracker, { timeoutMs: 1500 });
+    expect(timedOut).toBe(false);
+    expect(Date.now() - t0).toBeLessThan(1500);
+  });
 });
 
 describe("waitFor", () => {

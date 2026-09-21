@@ -33,10 +33,16 @@ export async function runAssert(ctx: ActionContext, step: AssertStep): Promise<v
 
   let backendNodeId: number | null = null;
   try {
-    backendNodeId = (await resolveTarget(handle, step.target, ctx.refs)).backendNodeId;
+    // hidden 断言不重试：目标不存在本就是它要断言的结果，白等一个重试预算纯属浪费
+    const retryMs = step.type === "hidden" ? 0 : ctx.resolveRetryMs;
+    backendNodeId = (await resolveTarget(handle, step.target, ctx.refs, { retryMs })).backendNodeId;
   } catch {
     backendNodeId = null;
   }
+  // assert 不走 runAction，自己要触发固化回调，否则带 ref 的断言步进不了 trace。
+  // 断言不改页面，此刻固化是安全的；hidden 断言目标不存在时跳过固化，
+  // 由 batch 决定这一步不进 capturedSteps
+  if (backendNodeId !== null) await ctx.onResolved?.(backendNodeId);
 
   const visible = await (async (): Promise<boolean> => {
     if (backendNodeId === null) return false;

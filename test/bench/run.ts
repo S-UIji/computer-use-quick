@@ -20,6 +20,7 @@ export interface BenchReport {
   turnsA: number;
   turnsB: number;
   turnsC: number;
+  medianAMs: number;
   medianBMs: number;
   medianCMs: number;
   markdown: string;
@@ -32,6 +33,28 @@ function median(xs: number[]): number {
   const s = [...xs].sort((a, b) => a - b);
   const mid = Math.floor(s.length / 2);
   return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
+}
+
+/** A：单步模式——模拟现状，每步一次 snapshot + 一步 batch（1 turn = 1 snapshot + 1 action） */
+async function runModeA(o: BenchOptions): Promise<number> {
+  const t0 = Date.now();
+  const steps = o.trace.steps.map((s) => absolutize(s, o.trace.baseUrl));
+  for (let i = 0; i < steps.length; i++) {
+    await takeSnapshot(o.handle);
+    const r = await runBatch({
+      handle: o.handle, tracker: o.tracker, collector: o.collector,
+      refs: new Map(), vars: o.vars,
+      steps: [steps[i]],
+      captureDescriptors: false
+    });
+    if (!r.ok) {
+      throw new Error(
+        `基准测试的 A 模式在第 ${i + 1} 步失败：` +
+        `${r.failure?.kind} ${r.failure?.message}`
+      );
+    }
+  }
+  return Date.now() - t0;
 }
 
 /** B：探索模式——每 BATCH_SIZE 步一次 batch，每批前先 snapshot */
@@ -59,21 +82,42 @@ async function runModeB(o: BenchOptions): Promise<number> {
   return Date.now() - t0;
 }
 
+/**
+ * 每轮之间把站点存储清掉。trace 假定从登出态开始，而一轮跑完浏览器是登录态，
+ * 不清理的话下一轮 navigate 会被重定向进主页、登录步骤全部落空（实测）。
+ */
+async function resetSiteState(o: BenchOptions): Promise<void> {
+  await o.handle.page.goto(o.trace.baseUrl, { waitUntil: "load" });
+  await o.handle.page.evaluate(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+}
+
 export async function runBench(o: BenchOptions): Promise<BenchReport> {
   const rounds = o.rounds ?? 5;
   const steps = o.trace.steps.length;
 
+  const aTimes: number[] = [];
   const bTimes: number[] = [];
   const cTimes: number[] = [];
   for (let i = 0; i < rounds; i++) {
+    await resetSiteState(o);
+    aTimes.push(await runModeA(o));
+    await resetSiteState(o);
     bTimes.push(await runModeB(o));
+    await resetSiteState(o);
     const rec = await replayTrace({ ...o });
     if (!rec.ok) {
-      throw new Error(`基准测试的 C 模式回放失败：${rec.failure?.kind} ${rec.failure?.message}`);
+      throw new Error(
+        `基准测试的 C 模式回放失败（第 ${(rec.failure?.failedIndex ?? 0) + 1} 步）：` +
+        `${rec.failure?.kind} ${rec.failure?.message}`
+      );
     }
     cTimes.push(rec.durationMs);
   }
 
+  const medianAMs = median(aTimes);
   const medianBMs = median(bTimes);
   const medianCMs = median(cTimes);
   const turnsA = steps;
@@ -87,7 +131,7 @@ export async function runBench(o: BenchOptions): Promise<BenchReport> {
     "",
     "| 方式 | 说明 | agent turn 数 | 实测耗时 |",
     "|---|---|---|---|",
-    `| A | 现状：每步一次模型往返 | ${turnsA} | 待人工填写 |`,
+    `| A | 单步模式：每步 snapshot + 1 步 batch | ${turnsA} | ${medianAMs}ms |`,
     `| B | 探索模式：snapshot + batch 交替 | ${turnsB} | ${medianBMs}ms |`,
     `| C | 回放模式：一次 replay，零模型 | ${turnsC} | ${medianCMs}ms |`,
     "",
@@ -95,9 +139,9 @@ export async function runBench(o: BenchOptions): Promise<BenchReport> {
       `（${Math.round((1 - turnsB / turnsA) * 100)}%），` +
       `A→C 减少 ${turnsA - turnsC} 次（${Math.round((1 - turnsC / turnsA) * 100)}%）`,
     "",
-    "> A 的耗时脚本测不了——它取决于真实模型往返速度。请用现状链路手动跑一次同样的用例，",
-    "> 记录墙钟时间填进上表，才能得到完整的提速倍数。"
+    "> A/B/C 三种模式的工具耗时均已自动测量。",
+    "> 模型思考时间未计入——实际提速取决于模型往返速度（设计文档估算 3-10s/turn）。"
   ].join("\n");
 
-  return { steps, turnsA, turnsB, turnsC, medianBMs, medianCMs, markdown };
+  return { steps, turnsA, turnsB, turnsC, medianAMs, medianBMs, medianCMs, markdown };
 }

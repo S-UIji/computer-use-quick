@@ -62,10 +62,12 @@ describe("MCP server（真实 stdio 协议）", () => {
     expect(r.result.serverInfo).toMatchObject({ name: "computer-use-quick", version: "0.1.0" });
   });
 
-  it("tools/list 恰好暴露六个工具（多了 list_pages）", async () => {
+  it("tools/list 恰好暴露七个工具", async () => {
     send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     const names = (await wait(2)).result.tools.map((t: { name: string }) => t.name).sort();
-    expect(names).toEqual(["batch", "inspect", "list_pages", "replay", "save_trace", "snapshot"]);
+    expect(names).toEqual(
+      ["batch", "discard_steps", "inspect", "list_pages", "replay", "save_trace", "snapshot"]
+    );
   });
 
   it("刻意不提供单步 click/fill 工具（防止退回一次一步）", async () => {

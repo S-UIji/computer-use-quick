@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>隐藏提交按钮</title></head>
+<body>
+  <main>
+    <h1>搜索</h1>
+    <!-- 复刻百度搜索表单的真实形态：
+         原生 submit 按钮被 CSS 隐藏（opacity:0），视觉位置由覆盖 div 替代。
+         CDP Input.dispatchMouseEvent 按坐标派发会打在覆盖 div 上，
+         而非 submit 按钮本身，导致表单不提交。 -->
+    <form id="search-form" action="javascript:void(0)">
+      <input id="kw" name="wd" type="text" placeholder="输入关键词">
+      <!-- 真实 submit 按钮：不可见但可提交 -->
+      <input id="su" type="submit" value="搜索"
+             style="opacity:0;position:absolute;width:80px;height:36px;left:200px;top:0;cursor:pointer">
+      <!-- 覆盖在 submit 按钮上的视觉层 -->
+      <div id="su-visual"
+           style="position:absolute;width:80px;height:36px;left:200px;top:0;background:#3385ff;color:#fff;text-align:center;line-height:36px;z-index:2">搜索</div>
+    </form>
+    <p id="submit-count">0</p>
+    <hr>
+    <!-- checkbox 用于验证不会双击 -->
+    <label><input id="agree" type="checkbox"> 同意条款</label>
+    <p id="change-count">0</p>
+  </main>
+  <script>
+    // submit 监听
+    let submits = 0;
+    document.getElementById("search-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      submits++;
+      document.getElementById("submit-count").textContent = String(submits);
+    });
+    // checkbox change 计数
+    let changes = 0;
+    document.getElementById("agree").addEventListener("change", () => {
+      changes++;
+      document.getElementById("change-count").textContent = String(changes);
+    });
+  </script>
+</body></html>

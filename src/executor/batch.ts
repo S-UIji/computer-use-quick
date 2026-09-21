@@ -21,6 +21,8 @@ export interface BatchOptions {
   captureDescriptors?: boolean;
   /** 隐式稳定性等待参数，覆盖 waitStable 的默认值 */
   stability?: StabilityOptions;
+  /** 目标解析的轮询重试预算（ms），默认 3000；传 0 恢复一次性解析 */
+  resolveRetryMs?: number;
 }
 
 export interface BatchResult {
@@ -60,7 +62,8 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
     tracker: opts.tracker,
     refs: opts.refs,
     vars: { ...opts.vars },
-    stability: opts.stability
+    stability: opts.stability,
+    resolveRetryMs: opts.resolveRetryMs ?? 3000
   };
 
   const results: StepResult[] = [];
@@ -71,6 +74,7 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
     const t0 = Date.now();
     const notes: string[] = [];
     ctx.onResolved = undefined;
+    ctx.lastWaitTimedOut = undefined;
 
     try {
       const step = interpolateStep(raw, ctx.vars);
@@ -93,7 +97,7 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
             // 不能因为拿不到 descriptor 就把一个已经成功的动作判成失败。
             notes.push(
               `ref「${refName}」固化成 descriptor 失败（${err instanceof Error ? err.message : String(err)}）：` +
-              `这一步不会进 trace，save_trace 时会提示需要重新探索`
+              `这一步不会进 trace，如需回放请重新探索这一步`
             );
           }
         };
@@ -105,7 +109,27 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
         await runAction(ctx, step);
       }
       ctx.onResolved = undefined;
-      capturedSteps.push(captured);
+      if (ctx.lastWaitTimedOut) {
+        // 打满上限不抛错是设计（等不到静默不耽误干活），但这笔开销必须显形——
+        // 否则持续流量页面上每一步都在静默地白付整个 timeout
+        notes.push(
+          `隐式等待打满 ${ctx.stability?.timeoutMs ?? 5000}ms 上限：页面有持续的接口请求或 DOM 变更，` +
+          `可考虑调小 stability.timeoutMs 或为该步改用显式 wait`
+        );
+        ctx.lastWaitTimedOut = undefined;
+      }
+      if (
+        opts.captureDescriptors !== false && refName !== undefined && captured === step
+      ) {
+        // 带 ref 的步骤没固化成功（固化抛错，或像 assert hidden 一样目标已不存在、
+        // 根本没机会固化）。它进 trace 会让 save_trace 整体拒绝且本 session 无法恢复，
+        // 所以按告警所说跳过它——跑得通比能回放重要。
+        if (!notes.length) {
+          notes.push(`ref「${refName}」未固化成 descriptor：这一步不会进 trace`);
+        }
+      } else {
+        capturedSteps.push(captured);
+      }
 
       results.push({
         index: i,

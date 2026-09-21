@@ -184,13 +184,20 @@ export interface ResolveOptions {
    * 报出来的是 `Node does not have a layout object` 这种看不懂的协议错误。
    */
   requireActionable?: boolean;
+  /**
+   * 解析失败后的轮询重试预算（ms），默认 0 = 一次性解析。
+   * 页面异步渲染时目标可能晚到几百毫秒（前一步的条件满足 ≠ DOM 渲染完），
+   * 一次性判负会把「还没渲染出来」误报成「元素不存在」。
+   */
+  retryMs?: number;
 }
 
-export async function resolve(
+async function resolveOnce(
   handle: PageHandle,
   d: Descriptor,
-  opts: ResolveOptions = {}
+  opts: ResolveOptions
 ): Promise<ResolveResult> {
+  // scope 必须在每次尝试内重取：上一尝试到现在页面可能已经导航，旧 documentNodeId 已失效
   const scope = await scopeNodeId(handle, d.framePath);
   const tried: string[] = [];
   /** 命中过但不可见/不可点的元素，留到全部策略都落空时报错用 */
@@ -228,6 +235,25 @@ export async function resolve(
     "target-not-found",
     d.distinguishers ?? []
   );
+}
+
+export async function resolve(
+  handle: PageHandle,
+  d: Descriptor,
+  opts: ResolveOptions = {}
+): Promise<ResolveResult> {
+  const deadline = Date.now() + (opts.retryMs ?? 0);
+
+  for (;;) {
+    try {
+      return await resolveOnce(handle, d, opts);
+    } catch (err) {
+      // target-not-found 与 ambiguous 都可能是渲染中途态，值得重试；
+      // 其它异常（协议错误等）重试无意义，直接抛
+      if (!(err instanceof LocatorError) || Date.now() >= deadline) throw err;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
 }
 
 export async function resolveTarget(

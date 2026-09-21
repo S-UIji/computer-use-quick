@@ -22,6 +22,18 @@ export function recordSteps(pageId: string, capturedSteps: Step[]): void {
   sessionSteps.set(pageId, acc);
 }
 
+/**
+ * 丢弃已记录的步骤：count 丢弃最近 N 步，省略则清空。返回丢弃的条数。
+ * 探索走了弯路（点错、回退）时用——sessionSteps 只增不减，
+ * 不丢弃的话弯路会一起被 save_trace 固化进 trace。
+ */
+export function discardSteps(pageId: string, count?: number): number {
+  const steps = sessionSteps.get(pageId) ?? [];
+  const n = count === undefined ? steps.length : Math.min(count, steps.length);
+  sessionSteps.set(pageId, steps.slice(0, steps.length - n));
+  return n;
+}
+
 export function createServer(session: BrowserSession): McpServer {
   const server = new McpServer({ name: "computer-use-quick", version: "0.1.0" });
 
@@ -75,17 +87,21 @@ export function createServer(session: BrowserSession): McpServer {
         steps: z.array(z.record(z.any())).min(1).describe("步骤数组，见 description"),
         vars: z.record(z.string()).optional()
           .describe("变量表，供 ${VAR} 插值；凭证从这里传，不要写进步骤字面量"),
+        resolveRetryMs: z.number().int().min(0).optional()
+          .describe("目标解析的轮询重试预算（默认 3000ms）。页面异步渲染时目标会晚到，" +
+            "重试能消除「还没渲染完被误判成不存在」的偶发失败；传 0 恢复一次性解析"),
         stability: z.object({
           domQuietMs: z.number().int().min(0).optional(),
           networkQuietMs: z.number().int().min(0).optional(),
           timeoutMs: z.number().int().min(0).optional()
         }).optional().describe(
           "隐式稳定性等待调参（默认 DOM 静默 150ms、网络静默 500ms、上限 5000ms）。" +
-          "页面持续有信标请求、或明确不需要等网络时调小 timeoutMs 能显著提速"
+          "只有 XHR/Fetch/Document/Script/Stylesheet 计入网络在途信号，信标/图片类请求不拖住等待；" +
+          "打满上限的步骤会在结果里带告警，看到告警再考虑调参"
         )
       }
     },
-    async ({ pageId, steps, vars, stability }) => {
+    async ({ pageId, steps, vars, stability, resolveRetryMs }) => {
       const handle = await session.getPage(pageId);
       const collector = await DiagnosticsCollector.attach(handle);
       const tracker = await NetworkTracker.attach(handle);
@@ -95,7 +111,7 @@ export function createServer(session: BrowserSession): McpServer {
         handle, tracker, collector, refs,
         vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
         steps: steps as unknown as Step[],
-        stability
+        stability, resolveRetryMs
       });
       refTables.set(handle.pageId, refs);
       recordSteps(handle.pageId, r.capturedSteps);
@@ -142,6 +158,27 @@ export function createServer(session: BrowserSession): McpServer {
   );
 
   server.registerTool(
+    "discard_steps",
+    {
+      description:
+        "丢弃本 session 已记录的步骤（最近 N 步或全部）。探索时点了弯路、做了多余操作，" +
+        "在 save_trace 前调用它把弯路扔掉，避免固化进 trace。",
+      inputSchema: {
+        pageId: z.string().optional(),
+        count: z.number().int().min(1).optional()
+          .describe("丢弃最近 N 步；省略则清空本页全部已记录步骤")
+      }
+    },
+    async ({ pageId, count }) => {
+      const handle = await session.getPage(pageId);
+      const n = discardSteps(handle.pageId, count);
+      const left = sessionSteps.get(handle.pageId)?.length ?? 0;
+      return { content: [{ type: "text" as const,
+        text: `已丢弃 ${n} 步，本页还剩 ${left} 步已记录步骤。` }] };
+    }
+  );
+
+  server.registerTool(
     "save_trace",
     {
       description:
@@ -181,10 +218,12 @@ export function createServer(session: BrowserSession): McpServer {
         vars: z.record(z.string()).optional().describe("变量表，凭证从这里传"),
         slowMoMs: z.number().int().min(0).optional()
           .describe("每步之间的延迟，演示场景用，默认 0"),
+        resolveRetryMs: z.number().int().min(0).optional()
+          .describe("目标解析的轮询重试预算，默认 3000ms；传 0 恢复一次性解析"),
         pageId: z.string().optional()
       }
     },
-    async ({ tracePath, vars, slowMoMs, pageId }) => {
+    async ({ tracePath, vars, slowMoMs, resolveRetryMs, pageId }) => {
       const handle = await session.getPage(pageId);
       const collector = await DiagnosticsCollector.attach(handle);
       const tracker = await NetworkTracker.attach(handle);
@@ -192,7 +231,7 @@ export function createServer(session: BrowserSession): McpServer {
 
       const trace = await loadTrace(tracePath);
       const rec = await replayTrace({
-        handle, tracker, collector, trace, slowMoMs,
+        handle, tracker, collector, trace, slowMoMs, resolveRetryMs,
         vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>
       });
       return { content: [{ type: "text" as const, text: renderRunRecord(rec) }] };
