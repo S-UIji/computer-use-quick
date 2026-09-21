@@ -28,10 +28,12 @@ export class BrowserSession {
   }
 
   async listPages(): Promise<Array<{ pageId: string; title: string; url: string }>> {
-    const pages = await this.browser.pages();
     const out: Array<{ pageId: string; title: string; url: string }> = [];
-    for (const page of pages) {
-      out.push({ pageId: targetIdOf(page), title: await page.title(), url: page.url() });
+    // 并行回放期间页面分散在多个 BrowserContext 里，要全部列出
+    for (const context of this.browser.browserContexts()) {
+      for (const page of await context.pages()) {
+        out.push({ pageId: targetIdOf(page), title: await page.title(), url: page.url() });
+      }
     }
     return out;
   }
@@ -45,6 +47,20 @@ export class BrowserSession {
     this.selected = pageId;
   }
 
+  /** 装配 handle：CDP session + 三个 enable。三处建页路径共用。 */
+  private async setupHandle(page: Page): Promise<PageHandle> {
+    const key = targetIdOf(page);
+    const cached = this.handles.get(key);
+    if (cached) return cached;
+    const cdp = await page.createCDPSession();
+    await cdp.send("Accessibility.enable");
+    await cdp.send("DOM.enable");
+    await cdp.send("Runtime.enable");
+    const handle: PageHandle = { pageId: key, page, cdp };
+    this.handles.set(key, handle);
+    return handle;
+  }
+
   async getPage(pageId?: string): Promise<PageHandle> {
     const id = pageId ?? this.selected;
     const pages = await this.browser.pages();
@@ -54,36 +70,34 @@ export class BrowserSession {
     page ??= pages[0];
     if (!page) throw new Error("浏览器中没有可用页面");
 
-    const key = targetIdOf(page);
-    const cached = this.handles.get(key);
-    if (cached) return cached;
-
-    const cdp = await page.createCDPSession();
-    await cdp.send("Accessibility.enable");
-    await cdp.send("DOM.enable");
-    await cdp.send("Runtime.enable");
-
-    const handle: PageHandle = { pageId: key, page, cdp };
-    this.handles.set(key, handle);
-    this.selected ??= key;
+    const handle = await this.setupHandle(page);
+    this.selected ??= handle.pageId;
     return handle;
   }
 
-  /**
-   * 开一个新标签页并建立 handle（自愈验证门用）。
-   * 不改变当前选中页——验证在独立标签页进行，与模型正在观察的失败页隔离。
-   */
+  /** 开一个新标签页并建立 handle。不改变当前选中页。 */
   async newPage(): Promise<PageHandle> {
-    const page = await this.browser.newPage();
-    const key = targetIdOf(page);
-    const cdp = await page.createCDPSession();
-    await cdp.send("Accessibility.enable");
-    await cdp.send("DOM.enable");
-    await cdp.send("Runtime.enable");
+    return this.setupHandle(await this.browser.newPage());
+  }
 
-    const handle: PageHandle = { pageId: key, page, cdp };
-    this.handles.set(key, handle);
-    return handle;
+  /**
+   * 开一个隔离页面：独立 BrowserContext + 页面，与日常页面零共享
+   * cookie/storage（二期并行的隔离单元；heal 验证门也用它防探索痕迹污染）。
+   * release 即销毁整个 Context（连带页面），可重复调用。
+   */
+  async newIsolatedPage(): Promise<{ handle: PageHandle; release: () => Promise<void> }> {
+    const context = await this.browser.createBrowserContext();
+    const handle = await this.setupHandle(await context.newPage());
+    let released = false;
+    const release = async (): Promise<void> => {
+      if (released) return;
+      released = true;
+      this.handles.delete(handle.pageId);
+      if (this.selected === handle.pageId) this.selected = undefined;
+      await handle.cdp.detach().catch(() => {});
+      await context.close().catch(() => {});
+    };
+    return { handle, release };
   }
 
   /** 关闭指定标签页并清理 handle（幂等，未知 id 直接忽略） */

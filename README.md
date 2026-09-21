@@ -49,7 +49,8 @@ npm run build
 | `discard_steps` | 探索走了弯路时，丢弃已记录的步骤（最近 N 步或全部），再 `save_trace` |
 | `save_trace` | 探索完，把成功的步骤固化成可回放用例 |
 | `replay` | 跑已有用例。CI 回归用这个，全程不调模型 |
-| `heal_step` | 回放失败后的自愈：演示修正步 → 新标签页全量重放验证 → 全绿才写回 trace。`assert-failed` 服务端拒修（可能是真 bug） |
+| `replay_suite` | 并行回放多条 trace：每条独立 BrowserContext（零共享 cookie），跑完全部再汇总；失败上下文可直接接 `heal_step`。`concurrency` 默认 3、上限 8 |
+| `heal_step` | 回放失败后的自愈：演示修正步 → 独立 Context 全量重放验证 → 全绿才写回 trace。`assert-failed` 服务端拒修（可能是真 bug） |
 | `inspect` | 只在排查失败时用。取截图/console/网络 |
 
 ## 三种用法
@@ -116,7 +117,8 @@ npm run bench -- ./traces/smoke-login.json
 ## 已知边界（一期）
 
 - 只支持 Web。桌面端在三期，感知层已留可插拔接口。
-- 串行单浏览器，多用例并行在二期。
+- 并行回放限单机单浏览器多 Context，`replay_suite` 的 `concurrency` 默认 3、硬上限 8；
+  实测 3 并发约 2.7x 加速（固定开销摊薄后会更接近 3x）。
 - **隐式等待检测不到纯 `setTimeout` 触发的更新**——那种情况页面上不存在任何在途信号，
   必须用显式 `wait`。带网络请求的异步更新则能正常等到。
 - 隐式等待的网络在途信号只统计 XHR/Fetch/Document/Script/Stylesheet，
@@ -134,7 +136,7 @@ npm run bench -- ./traces/smoke-login.json
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（28 个文件 / 206 个测试）
+npm test                  # 先 tsc 构建再跑全部（30 个文件 / 219 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```

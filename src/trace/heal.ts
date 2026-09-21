@@ -104,9 +104,9 @@ export async function runHeal(opts: RunHealOptions): Promise<HealOutcome> {
 
   const healed = buildHealedTrace(opts.trace, opts.stepIndex, demo.capturedSteps);
 
-  // 验证门：独立标签页全量重放。不复用失败页——模型探索可能把页面弄成了脏状态，
-  // 验证必须从一个干净标签页从头跑，才算真的修好了整条用例。
-  const vHandle = await opts.session.newPage();
+  // 验证门：独立 BrowserContext 全量重放。不复用失败页（脏状态），
+  // 也不与之共享 cookie/storage——探索痕迹进不了验证，验证过了才算真修好。
+  const { handle: vHandle, release } = await opts.session.newIsolatedPage();
   let validation: RunRecord;
   try {
     const vTracker = await NetworkTracker.attach(vHandle);
@@ -116,7 +116,7 @@ export async function runHeal(opts: RunHealOptions): Promise<HealOutcome> {
       trace: healed, vars: opts.vars
     });
   } finally {
-    await opts.session.closePage(vHandle.pageId);
+    await release();
   }
 
   if (!validation.ok) {

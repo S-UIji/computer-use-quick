@@ -9,6 +9,8 @@ import { runBatch } from "./executor/batch.js";
 import { saveTrace, loadTrace } from "./trace/store.js";
 import { replayTrace } from "./trace/replay.js";
 import { checkHealGate, runHeal, renderDemoFailure, type HealBudget } from "./trace/heal.js";
+import { checkConcurrency, runSuite } from "./trace/suite.js";
+import { renderSuiteResult } from "./report/suiteReport.js";
 import { renderRunRecord } from "./report/runRecord.js";
 
 /** 最近一次 snapshot 的 ref 表，按 pageId 保存，供 batch 用 ref 指代元素 */
@@ -245,6 +247,40 @@ export function createServer(session: BrowserSession): McpServer {
       lastRunByTrace.set(tracePath, rec);
       if (rec.ok) healBudgets.delete(tracePath);
       return { content: [{ type: "text" as const, text: renderRunRecord(rec) }] };
+    }
+  );
+
+  server.registerTool(
+    "replay_suite",
+    {
+      description:
+        "并行回放多条 trace：每条一个独立 BrowserContext（零共享 cookie/storage），" +
+        "跑完全部再汇总——任一失败不中断其他用例。CI 一轮回归用这个。\n" +
+        "返回聚合报告：概览（总数/成功/失败/墙钟耗时）+ 每条 compact 结果；" +
+        "失败用例附完整失败上下文，可直接进入 replay → heal_step 的自愈循环。\n" +
+        "concurrency 默认 3、硬上限 8；串行等价于 concurrency=1。",
+      inputSchema: {
+        tracePaths: z.array(z.string()).min(1).describe("trace 文件路径数组，≥1 条"),
+        concurrency: z.number().int().min(1).optional()
+          .describe("并发数，默认 3，硬上限 8；1 即串行"),
+        vars: z.record(z.string()).optional().describe("变量表，全部用例共享；凭证从这里传"),
+        slowMoMs: z.number().int().min(0).optional().describe("每步之间的延迟，演示用"),
+        resolveRetryMs: z.number().int().min(0).optional()
+          .describe("目标解析的轮询重试预算，默认 3000ms")
+      }
+    },
+    async ({ tracePaths, concurrency, vars, slowMoMs, resolveRetryMs }) => {
+      // 上限校验前置：不建任何浏览器资源就拒绝
+      const gate = checkConcurrency(concurrency);
+      if (!gate.ok) {
+        return { isError: true, content: [{ type: "text" as const, text: gate.reason }] };
+      }
+      const result = await runSuite({
+        session, paths: tracePaths,
+        vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
+        concurrency: gate.value, slowMoMs, resolveRetryMs
+      });
+      return { content: [{ type: "text" as const, text: renderSuiteResult(result) }] };
     }
   );
 
