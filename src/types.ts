@@ -153,6 +153,30 @@ export interface RunRecord {
   healRequired: boolean;
 }
 
+// ---------- 自愈 ----------
+
+/** heal 历史 sidecar（<trace 文件名>.heal.jsonl）里的一行 */
+export interface HealSidecarRecord {
+  healedAt: string;
+  stepIndex: number;
+  originalStep: Step;
+  replacementSteps: Step[];
+  validation: { ok: boolean; durationMs: number; driftCount: number };
+}
+
+/** 自愈预算：进程内权威，replay 全绿时由 server 清零 */
+export interface HealBudget {
+  /** 每步已消耗的验证次数（验证失败 +1） */
+  perStep: Map<number, number>;
+  /** 本轮修复周期内累计消耗的验证次数 */
+  total: number;
+}
+
+export type HealOutcome =
+  | { status: "healed"; dryRun: boolean; stepIndex: number; trace: Trace; validation: RunRecord }
+  | { status: "demo-failed"; stepIndex: number; failure: FailureContext }
+  | { status: "validation-failed"; stepIndex: number; trace: Trace; validation: RunRecord };
+
 // ---------- role 白名单 ----------
 
 export const INTERACTIVE_ROLES = new Set([

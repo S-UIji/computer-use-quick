@@ -1,6 +1,6 @@
-import { writeFile, readFile, mkdir } from "node:fs/promises";
+import { writeFile, readFile, mkdir, appendFile, rename } from "node:fs/promises";
 import { join } from "node:path";
-import type { Trace, Step } from "../types.js";
+import type { Trace, Step, HealSidecarRecord } from "../types.js";
 
 const SECRET_HINT = /(password|passwd|pwd|secret|token|credential|apikey|api_key)/i;
 
@@ -52,4 +52,36 @@ export async function loadTrace(path: string): Promise<Trace> {
     createdAt: parsed.createdAt ?? "",
     steps: parsed.steps
   };
+}
+
+/**
+ * 原子更新 trace：临时文件 + rename，崩溃不产生半截文件。
+ * 序列化约定与 saveTrace 一致（2 空格缩进 + 末尾换行），配合 {...trace, steps}
+ * 的改法，未触及的键序与内容逐字节不变，git diff 只体现被替换的步。
+ */
+export async function atomicWriteTrace(tracePath: string, trace: Trace): Promise<void> {
+  assertNoSecrets(trace);
+  const tmp = `${tracePath}.tmp-${process.pid}-${Date.now()}`;
+  await writeFile(tmp, JSON.stringify(trace, null, 2) + "\n", "utf8");
+  await rename(tmp, tracePath);
+}
+
+/** heal 历史 sidecar 路径：traces/smoke-login.json → traces/smoke-login.heal.jsonl */
+export function healSidecarPath(tracePath: string): string {
+  return tracePath.replace(/\.json$/, "") + ".heal.jsonl";
+}
+
+export async function appendHealRecord(tracePath: string, record: HealSidecarRecord): Promise<void> {
+  await appendFile(healSidecarPath(tracePath), JSON.stringify(record) + "\n", "utf8");
+}
+
+export async function readHealRecords(tracePath: string): Promise<HealSidecarRecord[]> {
+  let text: string;
+  try {
+    text = await readFile(healSidecarPath(tracePath), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  }
+  return text.split("\n").filter(Boolean).map((line) => JSON.parse(line) as HealSidecarRecord);
 }

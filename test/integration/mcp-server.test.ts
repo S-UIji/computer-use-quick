@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll, inject } from "vitest";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /**
  * 真正把 dist/index.js 作为 MCP server 拉起来，走 stdio 协议对话。
@@ -62,11 +65,11 @@ describe("MCP server（真实 stdio 协议）", () => {
     expect(r.result.serverInfo).toMatchObject({ name: "computer-use-quick", version: "0.1.0" });
   });
 
-  it("tools/list 恰好暴露七个工具", async () => {
+  it("tools/list 恰好暴露八个工具", async () => {
     send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     const names = (await wait(2)).result.tools.map((t: { name: string }) => t.name).sort();
     expect(names).toEqual(
-      ["batch", "discard_steps", "inspect", "list_pages", "replay", "save_trace", "snapshot"]
+      ["batch", "discard_steps", "heal_step", "inspect", "list_pages", "replay", "save_trace", "snapshot"]
     );
   });
 
@@ -137,5 +140,61 @@ describe("MCP server（真实 stdio 协议）", () => {
     expect(text).toContain("target-not-found");
     expect(text).toContain("## 当前快照");
     expect(text).toContain("## console 报错");
+  });
+
+  it("heal_step：assert-failed 被服务端拒修（全自动写回的安全门）", async () => {
+    const d = await mkdtemp(join(tmpdir(), "cuq-mcp-heal-"));
+    try {
+      const tracePath = join(d, "assert-fail.json");
+      await writeFile(tracePath, JSON.stringify({
+        name: "assert-fail", baseUrl: inject("fixtureURL"), createdAt: "",
+        steps: [
+          { action: "navigate", url: "/form.html" },
+          { action: "assert", type: "text-equals",
+            target: { descriptor: { strategies: [{ kind: "css", value: "#result" }], framePath: [] } },
+            expected: "绝对不匹配的文本XYZ" }
+        ]
+      }), "utf8");
+
+      send({ jsonrpc: "2.0", id: 9, method: "tools/call", params: {
+        name: "replay", arguments: { tracePath }
+      }});
+      const replayRes = await wait(9);
+      expect(replayRes.result.content[0].text).toContain("assert-failed");
+
+      send({ jsonrpc: "2.0", id: 10, method: "tools/call", params: {
+        name: "heal_step",
+        arguments: { tracePath, actions: [
+          { action: "click",
+            target: { descriptor: { strategies: [{ kind: "css", value: "#submit" }], framePath: [] } } }
+        ]}
+      }});
+      const res = await wait(10);
+      expect(res.result.isError).toBe(true);
+      expect(res.result.content[0].text).toContain("不可自动修复");
+    } finally {
+      await rm(d, { recursive: true, force: true });
+    }
+  });
+
+  it("heal_step：无失败记录时拒绝猜测目标步", async () => {
+    const d = await mkdtemp(join(tmpdir(), "cuq-mcp-heal2-"));
+    try {
+      const tracePath = join(d, "never-run.json");
+      await writeFile(tracePath, JSON.stringify({
+        name: "never-run", baseUrl: inject("fixtureURL"), createdAt: "",
+        steps: [{ action: "navigate", url: "/form.html" }]
+      }), "utf8");
+
+      send({ jsonrpc: "2.0", id: 11, method: "tools/call", params: {
+        name: "heal_step",
+        arguments: { tracePath, actions: [{ action: "sleep", ms: 1 }] }
+      }});
+      const res = await wait(11);
+      expect(res.result.isError).toBe(true);
+      expect(res.result.content[0].text).toContain("没有待修复的失败记录");
+    } finally {
+      await rm(d, { recursive: true, force: true });
+    }
   });
 });

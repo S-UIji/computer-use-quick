@@ -69,6 +69,33 @@ export class BrowserSession {
     return handle;
   }
 
+  /**
+   * 开一个新标签页并建立 handle（自愈验证门用）。
+   * 不改变当前选中页——验证在独立标签页进行，与模型正在观察的失败页隔离。
+   */
+  async newPage(): Promise<PageHandle> {
+    const page = await this.browser.newPage();
+    const key = targetIdOf(page);
+    const cdp = await page.createCDPSession();
+    await cdp.send("Accessibility.enable");
+    await cdp.send("DOM.enable");
+    await cdp.send("Runtime.enable");
+
+    const handle: PageHandle = { pageId: key, page, cdp };
+    this.handles.set(key, handle);
+    return handle;
+  }
+
+  /** 关闭指定标签页并清理 handle（幂等，未知 id 直接忽略） */
+  async closePage(pageId: string): Promise<void> {
+    const handle = this.handles.get(pageId);
+    if (!handle) return;
+    this.handles.delete(pageId);
+    if (this.selected === pageId) this.selected = undefined;
+    await handle.cdp.detach().catch(() => {});
+    await handle.page.close().catch(() => {});
+  }
+
   async close(): Promise<void> {
     for (const h of this.handles.values()) {
       await h.cdp.detach().catch(() => {});

@@ -49,6 +49,7 @@ npm run build
 | `discard_steps` | 探索走了弯路时，丢弃已记录的步骤（最近 N 步或全部），再 `save_trace` |
 | `save_trace` | 探索完，把成功的步骤固化成可回放用例 |
 | `replay` | 跑已有用例。CI 回归用这个，全程不调模型 |
+| `heal_step` | 回放失败后的自愈：演示修正步 → 新标签页全量重放验证 → 全绿才写回 trace。`assert-failed` 服务端拒修（可能是真 bug） |
 | `inspect` | 只在排查失败时用。取截图/console/网络 |
 
 ## 三种用法
@@ -59,6 +60,12 @@ npm run build
 
 **回归**：`replay` 传 trace 路径。凭证通过 `vars` 或环境变量注入，**绝不写进 trace**——
 写了明文，`save_trace` 会直接拒绝保存。
+
+**自愈**：replay 返回 `heal_required` 后，用 `snapshot`/`batch` 在失败页面上找到正确操作，
+调 `heal_step` 演示修正步——服务端捕获描述符、新标签页全量重放验证，全绿才原子写回，
+heal 历史留在 `<trace>.heal.jsonl` 供审计。只修定位类失败（找不到/歧义/超时），
+断言失败会被拒绝：那可能是被测系统的真 bug。同一步最多 2 次尝试、一轮最多 3 处，
+超出转人工。
 
 ## 快照长什么样
 
@@ -109,7 +116,6 @@ npm run bench -- ./traces/smoke-login.json
 ## 已知边界（一期）
 
 - 只支持 Web。桌面端在三期，感知层已留可插拔接口。
-- 回放失败时只报告 `heal_required`，不自动修复（二期）。
 - 串行单浏览器，多用例并行在二期。
 - **隐式等待检测不到纯 `setTimeout` 触发的更新**——那种情况页面上不存在任何在途信号，
   必须用显式 `wait`。带网络请求的异步更新则能正常等到。
@@ -128,7 +134,7 @@ npm run bench -- ./traces/smoke-login.json
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（26 个文件 / 185 个测试）
+npm test                  # 先 tsc 构建再跑全部（28 个文件 / 206 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```

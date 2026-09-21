@@ -1,13 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { BrowserSession } from "./session/browser.js";
-import type { Step } from "./types.js";
+import type { RunRecord, Step } from "./types.js";
 import { takeSnapshot } from "./perception/snapshot.js";
 import { DiagnosticsCollector } from "./diagnostics/collector.js";
 import { NetworkTracker } from "./waiter/stability.js";
 import { runBatch } from "./executor/batch.js";
 import { saveTrace, loadTrace } from "./trace/store.js";
 import { replayTrace } from "./trace/replay.js";
+import { checkHealGate, runHeal, renderDemoFailure, type HealBudget } from "./trace/heal.js";
 import { renderRunRecord } from "./report/runRecord.js";
 
 /** 最近一次 snapshot 的 ref 表，按 pageId 保存，供 batch 用 ref 指代元素 */
@@ -15,6 +16,12 @@ export const refTables = new Map<string, Map<string, number>>();
 
 /** 本 session 内每个页面成功执行过的步骤（ref 已固化成 descriptor），供 save_trace 消费 */
 export const sessionSteps = new Map<string, Step[]>();
+
+/** 每个 trace 最近一次 replay 的 run-record，供 heal_step 缺省定位失败步与白名单判定 */
+export const lastRunByTrace = new Map<string, RunRecord>();
+
+/** 每个 trace 的自愈预算；replay 全绿时清零，开启新一轮修复周期 */
+export const healBudgets = new Map<string, HealBudget>();
 
 export function recordSteps(pageId: string, capturedSteps: Step[]): void {
   const acc = sessionSteps.get(pageId) ?? [];
@@ -234,7 +241,104 @@ export function createServer(session: BrowserSession): McpServer {
         handle, tracker, collector, trace, slowMoMs, resolveRetryMs,
         vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>
       });
+      // 全绿 = 新一轮修复周期开始，自愈预算清零；失败则记下，供 heal_step 消费
+      lastRunByTrace.set(tracePath, rec);
+      if (rec.ok) healBudgets.delete(tracePath);
       return { content: [{ type: "text" as const, text: renderRunRecord(rec) }] };
+    }
+  );
+
+  server.registerTool(
+    "heal_step",
+    {
+      description:
+        "修复一条 replay 失败的 trace：先 replay 拿到失败上下文，用 snapshot/batch 在失败页面上" +
+        "找到正确操作，再把修正步作为 actions 传给本工具。服务端捕获定位描述符后，会在新标签页" +
+        "全量重放整条 trace 做验证——全绿才写回，修好即永久生效（也可 dryRun 只验证不写回）。\n" +
+        "修什么：只修「定位找不到/歧义/超时」（target-not-found/ambiguous/timeout）；assert-failed 一律拒绝" +
+        "——断言失败可能是被测系统真 bug，自动改期望等于掩盖缺陷。\n" +
+        "怎么修：actions 里用当前快照的 ref 演示修正步（1~3 步，替换失败的那 1 步）；元素只在瞬态出现、" +
+        "演示不了时改用 step 传手写完整步骤 JSON。二者只能给一个。\n" +
+        "预算：同一步最多 2 次尝试，一轮最多 3 处；超出请转人工。验证不通过会返回新的失败上下文，可继续修。\n" +
+        "提示：一次 heal 只替换失败的那一步。要修多步就循环 replay → heal_step。",
+      inputSchema: {
+        tracePath: z.string().describe("trace 文件路径，与 replay 相同"),
+        actions: z.array(z.record(z.any())).min(1).max(3).optional()
+          .describe("修正步数组（主形态）：在失败页面上演示的 1~3 步，target 用 snapshot 返回的 ref"),
+        step: z.record(z.any()).optional()
+          .describe("手写完整步骤 JSON（逃生舱）：含 strategies 数组，用于演示不了的瞬态元素"),
+        stepIndex: z.number().int().min(0).optional()
+          .describe("要修复的 0-based 步号；省略则用该 trace 最近一次 replay 的失败步"),
+        dryRun: z.boolean().optional()
+          .describe("true 时只验证不写回（不落盘、不记 heal 历史、不耗预算），默认 false"),
+        pageId: z.string().optional().describe("演示执行的页面，省略则用当前选中页"),
+        vars: z.record(z.string()).optional().describe("变量表，供 ${VAR} 插值；凭证从这里传")
+      }
+    },
+    async ({ tracePath, actions, step, stepIndex, dryRun, pageId, vars }) => {
+      const hasActions = actions !== undefined;
+      const hasStep = step !== undefined;
+      if (hasActions === hasStep) {
+        return { isError: true, content: [{ type: "text" as const,
+          text: "actions 与 step 必须且只能提供一个：actions 传演示步数组，step 传手写完整步骤 JSON。" }] };
+      }
+
+      const trace = await loadTrace(tracePath);
+      const lastRun = lastRunByTrace.get(tracePath);
+
+      // stepIndex 缺省取最近一次 replay 的失败步；没有失败记录就拒绝猜测
+      const k = stepIndex ?? lastRun?.failure?.failedIndex;
+      if (k === undefined) {
+        return { isError: true, content: [{ type: "text" as const,
+          text: "该 trace 没有待修复的失败记录。请先 replay 让它失败一次，或显式传 stepIndex。" }] };
+      }
+      if (k >= trace.steps.length) {
+        return { isError: true, content: [{ type: "text" as const,
+          text: `stepIndex ${k} 超出范围：trace 只有 ${trace.steps.length} 步（0-based）。` }] };
+      }
+
+      const budget = healBudgets.get(tracePath) ?? { perStep: new Map<number, number>(), total: 0 };
+      const gate = checkHealGate({ lastFailureKind: lastRun?.failure?.kind, budget, stepIndex: k });
+      if (!gate.ok) {
+        return { isError: true, content: [{ type: "text" as const, text: gate.reason }] };
+      }
+
+      const handle = await session.getPage(pageId);
+      const collector = await DiagnosticsCollector.attach(handle);
+      const tracker = await NetworkTracker.attach(handle);
+      const refs = refTables.get(handle.pageId) ?? new Map<string, number>();
+
+      const outcome = await runHeal({
+        session, handle, tracker, collector, refs,
+        tracePath, trace, stepIndex: k,
+        demoSteps: (hasActions ? actions! : [step!]) as unknown as Step[],
+        vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
+        dryRun: dryRun ?? false
+      });
+      refTables.set(handle.pageId, refs);
+
+      if (outcome.status === "demo-failed") {
+        return { isError: true, content: [{ type: "text" as const,
+          text: renderDemoFailure(outcome.failure) }] };
+      }
+
+      if (outcome.status === "validation-failed") {
+        // 验证失败计入预算；lastRun 保持原始失败记录（步号对应磁盘上的 trace）
+        budget.perStep.set(k, (budget.perStep.get(k) ?? 0) + 1);
+        budget.total += 1;
+        healBudgets.set(tracePath, budget);
+        return { isError: true, content: [{ type: "text" as const, text:
+          `❌ 修复未通过验证门（第 ${k + 1} 步的修复在新标签页全量重放时仍失败），trace 未写回。\n\n` +
+          renderRunRecord(outcome.validation) }] };
+      }
+
+      // healed：写回成功 → 验证 run-record 就是这条 trace 的最新状态，开启新一轮周期
+      healBudgets.delete(tracePath);
+      if (!outcome.dryRun) lastRunByTrace.set(tracePath, outcome.validation);
+      const mode = outcome.dryRun ? "dry-run 验证通过（未写回）" : "已写回";
+      return { content: [{ type: "text" as const, text:
+        `✅ 自愈成功：第 ${k + 1} 步已由 ${(hasActions ? actions! : [step!]).length} 步修复替换，${mode}。\n\n` +
+        renderRunRecord(outcome.validation) }] };
     }
   );
 
