@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { BrowserSession } from "./session/browser.js";
 import type { RunRecord, Step } from "./types.js";
 import { takeSnapshot } from "./perception/snapshot.js";
+import { diffLines, renderDiff } from "./perception/diff.js";
 import { DiagnosticsCollector } from "./diagnostics/collector.js";
 import { NetworkTracker } from "./waiter/stability.js";
 import { runBatch } from "./executor/batch.js";
@@ -24,6 +25,9 @@ export const lastRunByTrace = new Map<string, RunRecord>();
 
 /** 每个 trace 的自愈预算；replay 全绿时清零，开启新一轮修复周期 */
 export const healBudgets = new Map<string, HealBudget>();
+
+/** 每个 pageId 上一次 snapshot 的渲染文本，snapshot diff 的对比基线 */
+export const lastSnapshots = new Map<string, string>();
 
 export function recordSteps(pageId: string, capturedSteps: Step[]): void {
   const acc = sessionSteps.get(pageId) ?? [];
@@ -55,15 +59,29 @@ export function createServer(session: BrowserSession): McpServer {
       inputSchema: {
         pageId: z.string().optional().describe("目标页面 id，省略则用当前选中页"),
         expand: z.array(z.string()).optional().describe("要展开的折叠组 id 列表"),
-        threshold: z.number().int().min(2).optional().describe("折叠阈值，默认 3")
+        threshold: z.number().int().min(2).optional().describe("折叠阈值，默认 3"),
+        diff: z.boolean().optional()
+          .describe("true 时返回与上一次快照的行级增量（新增/消失），新元素带 ref 可直接操作")
       }
     },
-    async ({ pageId, expand, threshold }) => {
+    async ({ pageId, expand, threshold, diff }) => {
       const handle = await session.getPage(pageId);
       // 尽早挂上采集器，否则第一次失败时拿不到之前的 console 报错
       await DiagnosticsCollector.attach(handle);
       const snap = await takeSnapshot(handle, { expand, threshold });
       refTables.set(handle.pageId, snap.refs);
+
+      // 任何参数的 snapshot 都刷新 diff 基线
+      const prev = lastSnapshots.get(handle.pageId);
+      lastSnapshots.set(handle.pageId, snap.text);
+
+      if (diff) {
+        return { content: [{ type: "text" as const, text: renderDiff(diffLines(
+          prev === undefined ? null : prev.split("\n"),
+          snap.text.split("\n")
+        )) }] };
+      }
+
       return {
         content: [{
           type: "text" as const,

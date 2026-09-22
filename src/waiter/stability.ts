@@ -18,8 +18,11 @@ export class NetworkTracker {
    */
   private static readonly COUNTED_TYPES = new Set(["Document", "XHR", "Fetch", "Script", "Stylesheet"]);
 
-  private pending = new Map<string, number>(); // requestId → 发起时间
+  private pending = new Map<string, { url: string; at: number }>(); // requestId → 发起信息
   private changedAt = Date.now();
+  /** 已完成请求的 URL 环形缓冲，供 wait response 的 urlPattern 精确匹配 */
+  private completed: Array<{ url: string; at: number }> = [];
+  private static readonly COMPLETED_CAP = 100;
 
   /**
    * 在途条目的兜底存活期。两类场景靠它兜底：
@@ -40,16 +43,22 @@ export class NetworkTracker {
 
     await handle.cdp.send("Network.enable");
     await handle.cdp.send("Page.enable").catch(() => {});
-    handle.cdp.on("Network.requestWillBeSent", (e: { requestId: string; type?: string }) => {
+    handle.cdp.on("Network.requestWillBeSent", (e: {
+      requestId: string; type?: string; request?: { url?: string };
+    }) => {
       // type 缺失时保守计入（老版本 CDP 或特殊请求），有类型时只认白名单
       if (e.type !== undefined && !NetworkTracker.COUNTED_TYPES.has(e.type)) return;
-      t.pending.set(e.requestId, Date.now());
+      t.pending.set(e.requestId, { url: e.request?.url ?? "", at: Date.now() });
       t.changedAt = Date.now();
     });
     const done = (e: { requestId: string }): void => {
+      const entry = t.pending.get(e.requestId);
       // 未计入白名单的请求（信标/图片等）从头到尾不触碰静默计时
-      if (!t.pending.delete(e.requestId)) return;
+      if (!entry) return;
+      t.pending.delete(e.requestId);
       t.changedAt = Date.now();
+      t.completed.push({ url: entry.url, at: Date.now() });
+      if (t.completed.length > NetworkTracker.COMPLETED_CAP) t.completed.shift();
     };
     handle.cdp.on("Network.loadingFinished", done);
     handle.cdp.on("Network.loadingFailed", done);
@@ -62,12 +71,17 @@ export class NetworkTracker {
 
   inFlight(): number {
     const now = Date.now();
-    for (const [id, startedAt] of this.pending) {
-      if (now - startedAt > NetworkTracker.STALE_MS) this.pending.delete(id);
+    for (const [id, entry] of this.pending) {
+      if (now - entry.at > NetworkTracker.STALE_MS) this.pending.delete(id);
     }
     return this.pending.size;
   }
   lastChangeAt(): number { return this.changedAt; }
+
+  /** 自 since 以来是否有 URL 包含 pattern 的请求完成（wait response 的精确匹配） */
+  sawUrlSince(pattern: string, since: number): boolean {
+    return this.completed.some((c) => c.at >= since && c.url.includes(pattern));
+  }
 }
 
 /** 幂等地装上 MutationObserver（页面导航后 window 会重置，所以每次都要跑一遍） */

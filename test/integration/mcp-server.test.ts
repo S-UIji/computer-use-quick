@@ -198,8 +198,47 @@ describe("MCP server（真实 stdio 协议）", () => {
     }
   });
 
-  it("suite→heal 闭环：replay_suite 失败后 heal_step 直接消费（不带 stepIndex）", async () => {
-    const d = await mkdtemp(join(tmpdir(), "cuq-mcp-loop-"));
+  it("snapshot diff：增量模式只回变化行，无变化时明说", async () => {
+    // 基线：导航到 form 页并取一次全量快照
+    send({ jsonrpc: "2.0", id: 15, method: "tools/call", params: {
+      name: "batch",
+      arguments: { steps: [{ action: "navigate", url: `${inject("fixtureURL")}/form.html` }] }
+    }});
+    await wait(15);
+    send({ jsonrpc: "2.0", id: 16, method: "tools/call", params: {
+      name: "snapshot", arguments: {}
+    }});
+    await wait(16);
+
+    // 改动：填用户名（textbox 的 value 行变化）
+    send({ jsonrpc: "2.0", id: 17, method: "tools/call", params: {
+      name: "batch",
+      arguments: { steps: [{ action: "fill", target: { descriptor: {
+        strategies: [{ kind: "css", value: "#user" }], framePath: []
+      }}, value: "admin" }] }
+    }});
+    await wait(17);
+
+    // diff：只含变化行，不含全量快照头
+    send({ jsonrpc: "2.0", id: 18, method: "tools/call", params: {
+      name: "snapshot", arguments: { diff: true }
+    }});
+    const diffRes = await wait(18);
+    const diffText = diffRes.result.content[0].text;
+    expect(diffText).toContain("快照 diff");
+    expect(diffText).toContain("+ ");
+    expect(diffText).toContain("- ");
+    expect(diffText).not.toContain("# 页面快照");
+
+    // 再无变化时增量为空
+    send({ jsonrpc: "2.0", id: 19, method: "tools/call", params: {
+      name: "snapshot", arguments: { diff: true }
+    }});
+    const again = await wait(19);
+    expect(again.result.content[0].text).toContain("无差异");
+  });
+
+  it("suite→heal 闭环：replay_suite 失败后 heal_step 直接消费（不带 stepIndex）", async () => {    const d = await mkdtemp(join(tmpdir(), "cuq-mcp-loop-"));
     try {
       const tracePath = join(d, "suite-broken.json");
       await writeFile(tracePath, JSON.stringify({

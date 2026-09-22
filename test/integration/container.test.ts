@@ -56,7 +56,10 @@ describe("findAnchor", () => {
 
   it("markAncestors 打标记，clearMarks 清干净", async () => {
     const h = await open("cards-no-container.html");
-    const levels = await markAncestors(h, "教育事业群");
+    const { root } = (await h.cdp.send("DOM.getDocument", { depth: 0 })) as {
+      root: { nodeId: number };
+    };
+    const levels = await markAncestors(h, root.nodeId, "教育事业群");
     expect(levels).toBeGreaterThan(0);
 
     const marked = await h.cdp.send("Runtime.evaluate", {
@@ -65,7 +68,7 @@ describe("findAnchor", () => {
     });
     expect((marked.result as { value: number }).value).toBe(levels);
 
-    await clearMarks(h);
+    await clearMarks(h, root.nodeId);
     const after = await h.cdp.send("Runtime.evaluate", {
       expression: `document.querySelectorAll('[data-cuq-anchor]').length`,
       returnByValue: true

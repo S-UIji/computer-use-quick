@@ -151,4 +151,33 @@ describe("waitFor", () => {
       waitFor(h, tracker, { type: "url-contains", value: "永不出现" }, new Map(), 800)
     ).rejects.toThrow(/超时/);
   });
+
+  it("response：目标接口返回即通过（不等网络静默）", async () => {
+    const h = await open("async-list.html");
+    const p = waitFor(h, tracker, { type: "response", urlPattern: "api/orders" }, new Map(), 5000);
+    await new Promise((r) => setTimeout(r, 100)); // 先挂上等待，再触发请求
+    await h.cdp.send("Runtime.evaluate", { expression: `document.getElementById("load").click()` });
+    const t0 = Date.now();
+    await p;
+    const elapsed = Date.now() - t0;
+    // 接口 800ms 后返回：精确等待应在 ~800ms 处通过，而不是等额外的静默期
+    expect(elapsed).toBeGreaterThanOrEqual(600);
+    expect(elapsed).toBeLessThan(3000);
+  });
+
+  it("response：网络安静但目标接口从未调用 → 超时（不被静默近似误判）", async () => {
+    const h = await open("form.html"); // 静止页面，无任何请求
+    await expect(
+      waitFor(h, tracker, { type: "response", urlPattern: "api/orders" }, new Map(), 800)
+    ).rejects.toThrow(/超时/);
+  });
+
+  it("response：等待开始前已完成的历史响应不计入", async () => {
+    const h = await open("async-list.html");
+    await h.cdp.send("Runtime.evaluate", { expression: `document.getElementById("load").click()` });
+    await new Promise((r) => setTimeout(r, 1500)); // 请求早已完成，页面已安静
+    await expect(
+      waitFor(h, tracker, { type: "response", urlPattern: "api/orders" }, new Map(), 600)
+    ).rejects.toThrow(/超时/);
+  });
 });

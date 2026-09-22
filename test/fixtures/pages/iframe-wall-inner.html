@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>内嵌卡片</title></head>
+<body>
+  <main>
+    <div class="card">
+      <div class="title">教育事业群</div>
+      <button type="button">查看明细</button>
+    </div>
+    <div class="card">
+      <div class="title">技术平台中心</div>
+      <button type="button">查看明细</button>
+    </div>
+    <a href="#help">帮助文档</a>
+    <p id="clicked">未点击</p>
+  </main>
+  <script>
+    document.querySelectorAll(".card button").forEach(function (b) {
+      b.addEventListener("click", function (e) {
+        var name = e.target.closest(".card").querySelector(".title").textContent;
+        document.getElementById("clicked").textContent = name + " · " + e.target.textContent;
+      });
+    });
+  </script>
+</body></html>

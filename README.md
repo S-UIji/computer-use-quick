@@ -43,7 +43,7 @@ npm run build
 
 | 工具 | 什么时候用 |
 |---|---|
-| `snapshot` | 看当前页面有什么。替代截图。结构相同的兄弟节点会折叠，用 `expand` 展开 |
+| `snapshot` | 看当前页面有什么。替代截图。结构相同的兄弟节点会折叠，用 `expand` 展开；`diff: true` 只看与上次快照的变化（新增/消失行，新元素带 ref） |
 | `batch` | 执行一串动作。**不要一次只传一步**——那样就退回到慢的老路了 |
 | `list_pages` | 列出所有标签页的 pageId。点了会开新标签的链接后用 |
 | `discard_steps` | 探索走了弯路时，丢弃已记录的步骤（最近 N 步或全部），再 `save_trace` |
@@ -147,10 +147,8 @@ node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1�
 - 隐式等待的网络在途信号只统计 XHR/Fetch/Document/Script/Stylesheet，
   信标/图片类请求不拖住等待；单个请求超过 10s 视为长轮询或僵尸，不再阻塞。
   打满 timeoutMs 上限的步骤会在结果里带告警。
-- `wait` 的 `response` 条件用「网络静默」近似，不做 urlPattern 精确匹配。
-- iframe：支持同进程 iframe 的感知、css/role-name 定位与操作；跨进程 iframe（OOPIF）不支持。
-- iframe 内**不支持容器锚定和文本策略**——这两者依赖在主 frame 执行 JS 打标记，
-  够不到子文档。iframe 内请用 css 或 role-name。
+- iframe：支持同进程 iframe 的感知、css/role-name 定位与操作、**容器锚定与文本策略**；
+  跨进程 iframe（OOPIF）不支持。
 - `xpath` 兜底策略是全文档搜索，对 iframe 内元素理论上可能误命中主文档的同结构元素。
 - **click 对被 CSS 隐藏/覆盖的元素自动兜底**：先做 hit-test（`elementFromPoint`），
   若目标元素不在点击坐标（被覆盖 div 替代或 `opacity:0` 隐藏），在 CDP 鼠标事件之后
@@ -159,7 +157,7 @@ node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1�
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（30 个文件 / 221 个测试）
+npm test                  # 先 tsc 构建再跑全部（31 个文件 / 239 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```

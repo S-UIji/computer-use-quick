@@ -1,6 +1,6 @@
 import type { PageHandle } from "../session/browser.js";
 import type { Descriptor, ResolveResult, Strategy, TargetRef } from "../types.js";
-import { markAncestors, clearMarks } from "./container.js";
+import { markAncestors, clearMarks, callOnDocument } from "./container.js";
 import { scopeNodeId } from "../session/frames.js";
 
 export class LocatorError extends Error {
@@ -74,7 +74,8 @@ async function byAnchor(
   role: string,
   name: string
 ): Promise<number | null> {
-  const levels = await markAncestors(handle, anchorText);
+  // 打标在目标文档内执行（iframe 子文档走同一路径），查询用 scope 的 nodeId  pierce 进对应文档
+  const levels = await markAncestors(handle, scope, anchorText);
   try {
     for (let i = 0; i < levels; i++) {
       const { nodeIds } = (await handle.cdp.send("DOM.querySelectorAll", {
@@ -87,13 +88,14 @@ async function byAnchor(
     }
     return null;
   } finally {
-    await clearMarks(handle);
+    await clearMarks(handle, scope);
   }
 }
 
 /**
- * 文本策略：一次 evaluate 里筛出唯一匹配并打临时标记，再用选择器取回。
+ * 文本策略：在目标文档内筛出唯一匹配并打临时标记，再用选择器取回。
  * 逐个 resolveNode 读 textContent 会是 2N 次 CDP 往返，页面稍大就不可接受。
+ * 与锚定同路径：callFunctionOn 以 document 为执行主体，iframe 内同样适用。
  */
 async function byText(
   handle: PageHandle,
@@ -101,32 +103,29 @@ async function byText(
   tag: string,
   text: string
 ): Promise<number | null> {
-  const expression = `(function (tag, text) {
-    document.querySelectorAll("[data-cuq-text]").forEach(function (e) {
+  const fn = `function (tag, text) {
+    var doc = this;
+    doc.querySelectorAll("[data-cuq-text]").forEach(function (e) {
       e.removeAttribute("data-cuq-text");
     });
-    var els = Array.prototype.slice.call(document.querySelectorAll(tag)).filter(function (e) {
+    var els = Array.prototype.slice.call(doc.querySelectorAll(tag)).filter(function (e) {
       return (e.textContent || "").trim() === text;
     });
     if (els.length !== 1) return 0;
     els[0].setAttribute("data-cuq-text", "1");
     return 1;
-  })(${JSON.stringify(tag)}, ${JSON.stringify(text)})`;
+  }`;
 
-  const { result } = (await handle.cdp.send("Runtime.evaluate", {
-    expression,
-    returnByValue: true
-  })) as { result: { value: number } };
-  if (result.value !== 1) return null;
+  const marked = await callOnDocument<number>(handle, scope, fn, [{ value: tag }, { value: text }]);
+  if (marked !== 1) return null;
 
   try {
     return await bySelector(handle, scope, "[data-cuq-text]");
   } finally {
-    await handle.cdp.send("Runtime.evaluate", {
-      expression: `document.querySelectorAll("[data-cuq-text]")
-        .forEach(function (e) { e.removeAttribute("data-cuq-text"); })`,
-      returnByValue: true
-    });
+    await callOnDocument(handle, scope, `function () {
+      this.querySelectorAll("[data-cuq-text]")
+        .forEach(function (e) { e.removeAttribute("data-cuq-text"); });
+    }`);
   }
 }
 

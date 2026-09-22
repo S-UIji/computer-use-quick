@@ -53,6 +53,33 @@ async function objectIdOf(handle: PageHandle, backendNodeId: number): Promise<st
   return object.objectId;
 }
 
+/**
+ * 以目标文档对象为执行主体调用函数（this === document）。
+ * 打标/查找类操作统一走这条路：主 frame 与 iframe 同一条代码路径，
+ * 不再依赖固定打在主 frame 的 Runtime.evaluate——那是 iframe 内锚定失效的根因。
+ */
+export async function callOnDocument<T>(
+  handle: PageHandle,
+  scopeNodeId: number,
+  functionDeclaration: string,
+  args: Array<{ value: unknown }> = []
+): Promise<T | undefined> {
+  const { object } = (await handle.cdp.send("DOM.resolveNode", { nodeId: scopeNodeId })) as {
+    object: { objectId: string };
+  };
+  try {
+    const { result } = (await handle.cdp.send("Runtime.callFunctionOn", {
+      objectId: object.objectId,
+      functionDeclaration,
+      arguments: args,
+      returnByValue: true
+    })) as { result: { value: T | undefined } };
+    return result.value;
+  } finally {
+    await handle.cdp.send("Runtime.releaseObject", { objectId: object.objectId }).catch(() => {});
+  }
+}
+
 /** 该元素在全页范围内是否已经能被 role+name 唯一确定 */
 async function isGloballyUnique(handle: PageHandle, backendNodeId: number): Promise<boolean> {
   const { nodes } = (await handle.cdp.send("Accessibility.getPartialAXTree", {
@@ -94,9 +121,17 @@ export async function findAnchor(
   return result.value;
 }
 
-export async function markAncestors(handle: PageHandle, anchorText: string): Promise<number> {
-  const expression = `(function (anchorText) {
-    var all = document.querySelectorAll("*"), leaf = null;
+/**
+ * 在目标文档内打标：锚文本所在元素的祖先链由内向外标 data-cuq-anchor。
+ * 以 document 为执行主体（callFunctionOn），iframe 子文档与主 frame 同路径。
+ */
+export async function markAncestors(
+  handle: PageHandle,
+  scopeNodeId: number,
+  anchorText: string
+): Promise<number> {
+  const fn = `function (anchorText) {
+    var doc = this, all = doc.querySelectorAll("*"), leaf = null;
     for (var i = 0; i < all.length; i++) {
       if (all[i].children.length === 0 && (all[i].textContent || "").trim() === anchorText) {
         leaf = all[i]; break;
@@ -104,24 +139,20 @@ export async function markAncestors(handle: PageHandle, anchorText: string): Pro
     }
     if (!leaf) return 0;
     var cur = leaf.parentElement, n = 0;
-    while (cur && cur !== document.body && n < 10) {
+    while (cur && cur !== doc.body && n < 10) {
       cur.setAttribute("data-cuq-anchor", String(n));
       cur = cur.parentElement; n++;
     }
     return n;
-  })(${JSON.stringify(anchorText)})`;
-
-  const { result } = (await handle.cdp.send("Runtime.evaluate", {
-    expression,
-    returnByValue: true
-  })) as { result: { value: number } };
-  return result.value;
+  }`;
+  return (await callOnDocument<number>(handle, scopeNodeId, fn, [{ value: anchorText }])) ?? 0;
 }
 
-export async function clearMarks(handle: PageHandle): Promise<void> {
-  await handle.cdp.send("Runtime.evaluate", {
-    expression: `document.querySelectorAll('[data-cuq-anchor]')
-      .forEach(function (e) { e.removeAttribute('data-cuq-anchor'); })`,
-    returnByValue: true
-  });
+/** 清理目标文档内的打标（与 markAncestors 同路径，幂等） */
+export async function clearMarks(handle: PageHandle, scopeNodeId: number): Promise<void> {
+  const fn = `function () {
+    this.querySelectorAll("[data-cuq-anchor]")
+      .forEach(function (e) { e.removeAttribute("data-cuq-anchor"); });
+  }`;
+  await callOnDocument(handle, scopeNodeId, fn);
 }

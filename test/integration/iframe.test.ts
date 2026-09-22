@@ -102,3 +102,60 @@ describe("跨 frame 感知与操作", () => {
     expect(r.failure?.kind).toBe("target-not-found");
   });
 });
+
+describe("iframe 内锚定与文本策略（二期收尾解锁）", () => {
+  async function openWall(): Promise<PageHandle> {
+    const h = await session.getPage();
+    await h.page.goto(`${fx.url}/iframe-wall.html`, { waitUntil: "load" });
+    await new Promise((r) => setTimeout(r, 300)); // 等 iframe 内文档就绪
+    return h;
+  }
+
+  const innerClicked = async (h: PageHandle): Promise<string> => {
+    const { result } = await h.cdp.send("Runtime.evaluate", {
+      expression: `document.getElementById("wall").contentDocument.getElementById("clicked").textContent`,
+      returnByValue: true
+    });
+    return (result as { value: string }).value;
+  };
+
+  it("容器锚定在 iframe 内消歧同名按钮", async () => {
+    const h = await openWall();
+    const r = await runBatch({
+      handle: h, tracker, collector, refs: new Map(), vars: {},
+      steps: [{ action: "click", target: { descriptor: {
+        strategies: [{ kind: "container-role-name",
+          containerText: "技术平台中心", role: "button", name: "查看明细" }],
+        framePath: ["iframe-wall-inner.html"]
+      }}}]
+    });
+    expect(r.ok).toBe(true);
+    expect(await innerClicked(h)).toBe("技术平台中心 · 查看明细");
+  });
+
+  it("文本策略在 iframe 内命中唯一元素", async () => {
+    const h = await openWall();
+    const r = await runBatch({
+      handle: h, tracker, collector, refs: new Map(), vars: {},
+      steps: [{ action: "click", target: { descriptor: {
+        strategies: [{ kind: "text", tag: "a", text: "帮助文档" }],
+        framePath: ["iframe-wall-inner.html"]
+      }}}]
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  it("iframe 内文本歧义时未命中，不误伤主文档（主文档无同名元素）", async () => {
+    const h = await openWall();
+    const r = await runBatch({
+      handle: h, tracker, collector, refs: new Map(), vars: {},
+      steps: [{ action: "click", target: { descriptor: {
+        strategies: [{ kind: "text", tag: "button", text: "查看明细" }],
+        framePath: ["iframe-wall-inner.html"]
+      }}}]
+    });
+    // iframe 内该文本出现两次 → 唯一性筛选不通过 → target-not-found（而非命中主文档）
+    expect(r.ok).toBe(false);
+    expect(r.failure?.kind).toBe("target-not-found");
+  });
+});

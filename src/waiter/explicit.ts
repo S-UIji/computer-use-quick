@@ -30,6 +30,8 @@ export async function waitFor(
   timeoutMs = 10_000
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  // response 的精确语义锚点：等待开始后才完成的匹配响应才算数，历史请求不计入
+  const since = Date.now();
 
   const satisfied = async (): Promise<boolean> => {
     switch (cond.type) {
@@ -48,8 +50,9 @@ export async function waitFor(
       case "url-contains":
         return (await currentUrl(handle)).includes(cond.value);
       case "response":
-        // 一期用"网络静默"近似，不做 urlPattern 精确匹配（见 README 已知边界）
-        return tracker.inFlight() === 0 && Date.now() - tracker.lastChangeAt() >= 300;
+        // urlPattern 精确匹配：等待开始后有 URL 包含 pattern 的请求完成即满足。
+        // 不做「网络静默」回退——静默近似正是本修复要消灭的缺陷（等错的接口安静了也会通过）
+        return tracker.sawUrlSince(cond.urlPattern, since);
     }
   };
 
