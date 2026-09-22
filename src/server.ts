@@ -280,6 +280,12 @@ export function createServer(session: BrowserSession): McpServer {
         vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
         concurrency: gate.value, slowMoMs, resolveRetryMs
       });
+      // 逐 trace 记账：suite 的结果对 heal_step 直接可见，语义等价于各跑过一次单条 replay。
+      // 成功 trace 同时清自愈预算——全绿即开启新一轮修复周期
+      for (const t of result.results) {
+        if (t.record) lastRunByTrace.set(t.path, t.record);
+        if (t.ok) healBudgets.delete(t.path);
+      }
       return { content: [{ type: "text" as const, text: renderSuiteResult(result) }] };
     }
   );

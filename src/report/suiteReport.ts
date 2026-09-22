@@ -33,5 +33,8 @@ export function renderSuiteResult(r: SuiteResult): string {
     }
   }
 
+  // 机读收尾行：固定格式、固定位置（最后一行），CI 日志 grep 出退出依据。值纯数字无空格。
+  lines.push(`SUITE_RESULT ok=${r.ok} failed=${r.failed} total=${r.total} wall_ms=${r.durationMs}`);
+
   return lines.join("\n");
 }

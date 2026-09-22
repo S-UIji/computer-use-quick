@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, inject } from "vitest";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -193,6 +193,57 @@ describe("MCP server（真实 stdio 协议）", () => {
       const res = await wait(11);
       expect(res.result.isError).toBe(true);
       expect(res.result.content[0].text).toContain("没有待修复的失败记录");
+    } finally {
+      await rm(d, { recursive: true, force: true });
+    }
+  });
+
+  it("suite→heal 闭环：replay_suite 失败后 heal_step 直接消费（不带 stepIndex）", async () => {
+    const d = await mkdtemp(join(tmpdir(), "cuq-mcp-loop-"));
+    try {
+      const tracePath = join(d, "suite-broken.json");
+      await writeFile(tracePath, JSON.stringify({
+        name: "suite-broken", baseUrl: inject("fixtureURL"), createdAt: "",
+        steps: [
+          { action: "navigate", url: "/form.html" },
+          { action: "click", target: { descriptor: {
+            strategies: [{ kind: "role-name", role: "button", name: "不存在的按钮" }],
+            framePath: []
+          } } }
+        ]
+      }), "utf8");
+
+      // 1. suite 批量跑：该 trace 失败，机读行 failed=1
+      send({ jsonrpc: "2.0", id: 12, method: "tools/call", params: {
+        name: "replay_suite", arguments: { tracePaths: [tracePath] }
+      }});
+      const suiteRes = await wait(12);
+      const suiteText = suiteRes.result.content[0].text;
+      expect(suiteText).toContain("target-not-found");
+      const lastLine = suiteText.trim().split("\n").pop()!;
+      expect(lastLine).toMatch(/^SUITE_RESULT ok=0 failed=1 total=1 wall_ms=\d+$/);
+
+      // 2. 紧接着 heal_step 不带 stepIndex：必须直接消费 suite 的失败记录
+      send({ jsonrpc: "2.0", id: 13, method: "tools/call", params: {
+        name: "heal_step",
+        arguments: { tracePath, actions: [{ action: "sleep", ms: 1 }] }
+      }});
+      const healRes = await wait(13);
+      expect(healRes.result.isError ?? false).toBe(false);
+      expect(healRes.result.content[0].text).toContain("自愈成功");
+
+      // 3. 写回已固化到磁盘
+      const healed = JSON.parse(await readFile(tracePath, "utf8"));
+      expect(healed.steps[1].action).toBe("sleep");
+
+      // 4.  healed 后 lastRun 是绿色记录：再 heal 应报「没有待修复的失败记录」
+      send({ jsonrpc: "2.0", id: 14, method: "tools/call", params: {
+        name: "heal_step",
+        arguments: { tracePath, actions: [{ action: "sleep", ms: 1 }] }
+      }});
+      const again = await wait(14);
+      expect(again.result.isError).toBe(true);
+      expect(again.result.content[0].text).toContain("没有待修复的失败记录");
     } finally {
       await rm(d, { recursive: true, force: true });
     }

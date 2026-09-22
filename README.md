@@ -114,6 +114,19 @@ npm run bench -- ./traces/smoke-login.json
 自动输出 A/B/C 三种方式的 turn 数与实测工具耗时对照。模型思考时间未计入——
 实际提速取决于模型往返速度（设计文档估算 3-10s/turn）。
 
+## CI 无人值守回归
+
+```bash
+node scripts/ci-harness.mjs up     # 起 headless Chrome，环境写入 .scratch/ci-env.json
+#   CI agent 用环境里的 browserURL 配置 MCP，跑自愈循环：
+#   replay_suite → 逐失败 heal_step → 全绿（见 docs/ci-unattended-loop.md）
+node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1，自动清理
+```
+
+批量报告末行是机读收尾行 `SUITE_RESULT ok=N failed=M total=K wall_ms=D`，
+流水线 grep 它拿退出依据。自愈有服务端护栏：只修定位类失败、单步≤2 次、
+一轮≤3 处、断言失败拒修（转人工），全自动写回前必过独立 Context 验证门。
+
 ## 已知边界（一期）
 
 - 只支持 Web。桌面端在三期，感知层已留可插拔接口。
@@ -136,7 +149,7 @@ npm run bench -- ./traces/smoke-login.json
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（30 个文件 / 219 个测试）
+npm test                  # 先 tsc 构建再跑全部（30 个文件 / 221 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```

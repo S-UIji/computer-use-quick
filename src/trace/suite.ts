@@ -33,7 +33,7 @@ export interface SuiteTraceResult {
   driftCount: number;
   /** 未预期异常（如 trace 文件读不出、Context 创建失败）；步骤失败走 record */
   error?: string;
-  /** 失败用例的完整 run-record，接 heal_step 自愈循环 */
+  /** 完整 run-record（成功与失败都带；server 逐 trace 记账用，失败上下文接 heal_step） */
   record?: RunRecord;
 }
 
@@ -69,7 +69,8 @@ async function runOne(opts: RunSuiteOptions, path: string): Promise<SuiteTraceRe
     return {
       path, name: trace.name, ok: rec.ok, durationMs: Date.now() - t0,
       stepCount: rec.steps.length, driftCount: rec.drifts.length,
-      record: rec.ok ? undefined : rec
+      // record 始终带上：server 要逐 trace 记账（suite→heal 闭环），ok 的 record 也有消费价值
+      record: rec
     };
   } catch (err) {
     // 未预期异常兜底为单条失败：trace 读不出/Context 创建失败等，

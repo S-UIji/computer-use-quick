@@ -80,4 +80,12 @@ describe("renderSuiteResult 聚合报告", () => {
     };
     expect(renderSuiteResult(allOk)).not.toContain("失败上下文");
   });
+
+  it("机读收尾行：固定格式、固定键序、是整个报告的最后一行", () => {
+    const text = renderSuiteResult(mixed);
+    const lines = text.split("\n");
+    expect(lines[lines.length - 1]).toBe("SUITE_RESULT ok=1 failed=2 total=3 wall_ms=12345");
+    // 值纯数字无空格，grep/awk 零成本
+    expect(lines[lines.length - 1]).toMatch(/^SUITE_RESULT ok=\d+ failed=\d+ total=\d+ wall_ms=\d+$/);
+  });
 });
