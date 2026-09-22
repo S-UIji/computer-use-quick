@@ -187,6 +187,22 @@
         }
       },
       "value": "教育事业群"
+    },
+    {
+      "action": "assert",
+      "type": "hidden",
+      "target": {
+        "descriptor": {
+          "strategies": [
+            {
+              "kind": "role-name",
+              "role": "button",
+              "name": "安徽讯学教育科技有限公司(体系外)"
+            }
+          ],
+          "framePath": []
+        }
+      }
     }
   ]
 }

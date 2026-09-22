@@ -58,6 +58,8 @@ npm run build
 **探索式测试**：`snapshot` 看页面 → `batch` 执行一批 → 再 `snapshot` 确认 → 循环。
 
 **固化**：探索通过后 `save_trace`，得到一个 JSON 文件，用 git 管起来。
+写 trace 时给每个意图步配断言（自愈验证门的语义天花板），配方见
+[`docs/trace-authoring.md`](docs/trace-authoring.md)。
 
 **回归**：`replay` 传 trace 路径。凭证通过 `vars` 或环境变量注入，**绝不写进 trace**——
 写了明文，`save_trace` 会直接拒绝保存。
