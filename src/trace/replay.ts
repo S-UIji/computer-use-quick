@@ -1,7 +1,7 @@
 import type { PageHandle } from "../session/browser.js";
 import type { NetworkTracker } from "../waiter/stability.js";
 import type { DiagnosticsCollector } from "../diagnostics/collector.js";
-import type { RunRecord, Trace, Step, Descriptor } from "../types.js";
+import type { RunRecord, Trace, Step, Descriptor, VisualOptions } from "../types.js";
 import { runBatch } from "../executor/batch.js";
 
 export interface ReplayOptions {
@@ -14,6 +14,8 @@ export interface ReplayOptions {
   slowMoMs?: number;
   /** 目标解析的轮询重试预算（ms），默认 3000；传 0 恢复一次性解析 */
   resolveRetryMs?: number;
+  /** 视觉断言链路配置（screenshot-match 基线归属与更新模式） */
+  visual?: VisualOptions;
 }
 
 /** 把 trace 里的相对 url 补全成绝对地址 */
@@ -57,7 +59,8 @@ export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
     vars: opts.vars,
     steps: withSlowMo,
     captureDescriptors: false,
-    resolveRetryMs: opts.resolveRetryMs
+    resolveRetryMs: opts.resolveRetryMs,
+    visual: opts.visual
   });
 
   // 去掉 slowMo 插入的 sleep，序号换算回真实步序号
@@ -87,6 +90,7 @@ export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
     steps: realResults,
     drifts,
     failure,
-    healRequired: !r.ok
+    healRequired: !r.ok,
+    artifacts: r.artifacts.length > 0 ? r.artifacts : undefined
   };
 }

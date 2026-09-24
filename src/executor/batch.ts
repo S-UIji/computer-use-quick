@@ -1,7 +1,7 @@
 import type { PageHandle } from "../session/browser.js";
 import type { NetworkTracker } from "../waiter/stability.js";
 import type { DiagnosticsCollector } from "../diagnostics/collector.js";
-import type { FailureContext, FailureKind, Step, StepResult } from "../types.js";
+import type { FailureContext, FailureKind, RunArtifact, Step, StepResult, VisualOptions } from "../types.js";
 import { runAction, type ActionContext } from "./actions.js";
 import type { StabilityOptions } from "../waiter/stability.js";
 import { runAssert, AssertionFailure } from "../assertion/assert.js";
@@ -23,6 +23,8 @@ export interface BatchOptions {
   stability?: StabilityOptions;
   /** 目标解析的轮询重试预算（ms），默认 3000；传 0 恢复一次性解析 */
   resolveRetryMs?: number;
+  /** 视觉断言链路配置（screenshot-match 基线归属与更新模式） */
+  visual?: VisualOptions;
 }
 
 export interface BatchResult {
@@ -32,6 +34,8 @@ export interface BatchResult {
   snapshot: string;
   /** 固化后的步骤：所有 {ref} 已替换为 {descriptor}，可直接写进 trace */
   capturedSteps: Step[];
+  /** 失败现场产物（视觉断言三图等），随结果上交归档 */
+  artifacts: RunArtifact[];
   failure?: FailureContext;
 }
 
@@ -63,7 +67,9 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
     refs: opts.refs,
     vars: { ...opts.vars },
     stability: opts.stability,
-    resolveRetryMs: opts.resolveRetryMs ?? 3000
+    resolveRetryMs: opts.resolveRetryMs ?? 3000,
+    visual: opts.visual,
+    artifacts: []
   };
 
   const results: StepResult[] = [];
@@ -104,7 +110,8 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
       }
 
       if (step.action === "assert") {
-        await runAssert(ctx, step);
+        const note = await runAssert(ctx, step);
+        if (note) notes.push(note);
       } else {
         await runAction(ctx, step);
       }
@@ -162,6 +169,7 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
         vars: ctx.vars,
         snapshot: snapshotText,
         capturedSteps,
+        artifacts: ctx.artifacts ?? [],
         failure: {
           failedIndex: i,
           failedStep: raw,
@@ -180,5 +188,5 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
   opts.refs.clear();
   for (const [k, v] of final.refs) opts.refs.set(k, v);
 
-  return { ok: true, results, vars: ctx.vars, snapshot: final.text, capturedSteps };
+  return { ok: true, results, vars: ctx.vars, snapshot: final.text, capturedSteps, artifacts: ctx.artifacts ?? [] };
 }

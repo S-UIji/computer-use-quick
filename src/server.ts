@@ -282,10 +282,12 @@ export function createServer(session: BrowserSession): McpServer {
           .describe("目标解析的轮询重试预算，默认 3000ms；传 0 恢复一次性解析"),
         pageId: z.string().optional(),
         auth: z.string().optional()
-          .describe("认证态文件路径；省略则用 save_auth 设置的 session 默认")
+          .describe("认证态文件路径；省略则用 save_auth 设置的 session 默认"),
+        updateBaselines: z.boolean().optional()
+          .describe("true 时重录全部视觉基线并一律通过（页面改版属预期时用），默认 false")
       }
     },
-    async ({ tracePath, vars, slowMoMs, resolveRetryMs, pageId, auth }) => {
+    async ({ tracePath, vars, slowMoMs, resolveRetryMs, pageId, auth, updateBaselines }) => {
       const handle = await session.getPage(pageId);
       const collector = await DiagnosticsCollector.attach(handle);
       const tracker = await NetworkTracker.attach(handle);
@@ -301,7 +303,8 @@ export function createServer(session: BrowserSession): McpServer {
       const trace = await loadTrace(tracePath);
       const rec = await replayTrace({
         handle, tracker, collector, trace, slowMoMs, resolveRetryMs,
-        vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>
+        vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
+        visual: { traceName: trace.name, updateBaselines }
       });
       // 全绿 = 新一轮修复周期开始，自愈预算清零；失败则记下，供 heal_step 消费
       lastRunByTrace.set(tracePath, rec);
@@ -334,10 +337,12 @@ export function createServer(session: BrowserSession): McpServer {
         resolveRetryMs: z.number().int().min(0).optional()
           .describe("目标解析的轮询重试预算，默认 3000ms"),
         auth: z.string().optional()
-          .describe("认证态文件路径；省略则用 save_auth 设置的 session 默认")
+          .describe("认证态文件路径；省略则用 save_auth 设置的 session 默认"),
+        updateBaselines: z.boolean().optional()
+          .describe("true 时重录全部视觉基线并一律通过，默认 false")
       }
     },
-    async ({ tracePaths, concurrency, vars, slowMoMs, resolveRetryMs, auth }) => {
+    async ({ tracePaths, concurrency, vars, slowMoMs, resolveRetryMs, auth, updateBaselines }) => {
       // 上限校验前置：不建任何浏览器资源就拒绝
       const gate = checkConcurrency(concurrency);
       if (!gate.ok) {
@@ -351,7 +356,8 @@ export function createServer(session: BrowserSession): McpServer {
         session, paths: tracePaths,
         vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
         concurrency: gate.value, slowMoMs, resolveRetryMs,
-        auth: authState
+        auth: authState,
+        updateBaselines
       });
       // 逐 trace 记账：suite 的结果对 heal_step 直接可见，语义等价于各跑过一次单条 replay。
       // 成功 trace 同时清自愈预算——全绿即开启新一轮修复周期

@@ -1,5 +1,5 @@
 import type { PageHandle } from "../session/browser.js";
-import type { ResolveResult, Step, TargetRef } from "../types.js";
+import type { ResolveResult, RunArtifact, Step, TargetRef, VisualOptions } from "../types.js";
 import { resolveTarget, type ResolveOptions } from "../locator/resolve.js";
 import { NetworkTracker, waitStable, type StabilityOptions } from "../waiter/stability.js";
 import { waitFor } from "../waiter/explicit.js";
@@ -17,6 +17,10 @@ export interface ActionContext {
   resolveRetryMs?: number;
   /** 隐式稳定性等待参数，batch 可整体覆盖（默认值见 waitStable） */
   stability?: StabilityOptions;
+  /** 视觉断言链路配置（screenshot-match 的基线归属与更新模式） */
+  visual?: VisualOptions;
+  /** 失败现场产物收集（视觉断言三图）；batch 结束时随结果上交归档 */
+  artifacts?: RunArtifact[];
   /**
    * 元素刚解析出来、动作尚未执行时的回调。batch 用它把 ref 固化成 descriptor，
    * 这个时机是最后的安全窗口——动作可能把页面导航走。

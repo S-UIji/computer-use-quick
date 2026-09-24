@@ -1,6 +1,11 @@
 import type { Step } from "../types.js";
 import type { ActionContext } from "../executor/actions.js";
+import { waitStable } from "../waiter/stability.js";
 import { resolveTarget } from "../locator/resolve.js";
+import { existsSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { baselineHash, decodePng, diffPng, encodePng } from "../perception/pngDiff.js";
 
 export class AssertionFailure extends Error {
   constructor(message: string, public actual: string, public expected: string) {
@@ -11,7 +16,84 @@ export class AssertionFailure extends Error {
 
 type AssertStep = Extract<Step, { action: "assert" }>;
 
-export async function runAssert(ctx: ActionContext, step: AssertStep): Promise<void> {
+/** 截图前注入：冻结动画/过渡/光标闪烁，消除动态内容噪声（幂等） */
+const FREEZE_CSS = `(function () {
+  if (window.__cuqFreeze) return;
+  window.__cuqFreeze = true;
+  var s = document.createElement("style");
+  s.textContent = "*, *::before, *::after { animation: none !important; transition: none !important; caret-color: transparent !important; }";
+  document.documentElement.appendChild(s);
+})()`;
+
+/**
+ * screenshot-match：等待稳定 → 冻结动画 → 截图 → 基线不存在或更新模式则写基线通过，
+ * 否则逐像素比对，超阈值抛 assert-failed 并把 actual/expected/diff 三图放进 artifacts。
+ */
+async function runScreenshotMatch(
+  ctx: ActionContext,
+  step: AssertStep,
+  backendNodeId: number | null
+): Promise<string | undefined> {
+  const { handle } = ctx;
+  const visual = ctx.visual ?? {};
+  const dir = join(visual.baselineRoot ?? "traces/baselines", visual.traceName ?? "_explore");
+  const hash = baselineHash(step.target, step.fullPage);
+  const baselinePath = join(dir, `${hash}.png`);
+
+  // 断言不走 runAction，得自己等稳定；随后冻结动画再截图
+  await waitStable(handle, ctx.tracker, ctx.stability);
+  await handle.cdp.send("Runtime.evaluate", { expression: FREEZE_CSS });
+
+  let clip: { x: number; y: number; width: number; height: number; scale: number } | undefined;
+  if (!step.fullPage) {
+    if (backendNodeId === null) {
+      throw new AssertionFailure("视觉断言目标元素不存在", "(不存在)", "(基线)");
+    }
+    const { model } = (await handle.cdp.send("DOM.getBoxModel", { backendNodeId })) as {
+      model?: { content: number[]; width: number; height: number };
+    };
+    if (!model || model.width <= 0 || model.height <= 0) {
+      throw new AssertionFailure("视觉断言目标元素不可见", "(不可见)", "(基线)");
+    }
+    clip = { x: model.content[0], y: model.content[1], width: model.width, height: model.height, scale: 1 };
+  }
+
+  const { data } = (await handle.cdp.send("Page.captureScreenshot", {
+    format: "png", ...(clip ? { clip } : {})
+  })) as { data: string };
+  const actualBuf = Buffer.from(data, "base64");
+
+  await mkdir(dir, { recursive: true });
+  const baselineExists = existsSync(baselinePath);
+  if (visual.updateBaselines || !baselineExists) {
+    await writeFile(baselinePath, actualBuf);
+    return visual.updateBaselines && baselineExists ? "基线已更新" : "基线已创建";
+  }
+
+  const expectedBuf = await readFile(baselinePath);
+  const threshold = step.threshold ?? 0.001;
+  const { ratio, exceeded, diff, sizeMismatch } = diffPng(
+    decodePng(actualBuf), decodePng(expectedBuf), { threshold }
+  );
+  if (!exceeded) return undefined;
+
+  const base = `screenshot-${step.fullPage ? "full" : "el"}-${hash}`;
+  ctx.artifacts?.push(
+    { name: `${base}-actual.png`, base64: data },
+    { name: `${base}-expected.png`, base64: expectedBuf.toString("base64") },
+    { name: `${base}-diff.png`, base64: encodePng(diff).toString("base64") }
+  );
+  const sizeNote = sizeMismatch
+    ? `（尺寸不一致：实际 ${sizeMismatch.actual.w}×${sizeMismatch.actual.h} vs 基线 ${sizeMismatch.expected.w}×${sizeMismatch.expected.h}）`
+    : "";
+  throw new AssertionFailure(
+    `视觉差异 ${(ratio * 100).toFixed(3)}% 超过阈值 ${(threshold * 100).toFixed(3)}%${sizeNote}`,
+    `${(ratio * 100).toFixed(3)}%`,
+    `${(threshold * 100).toFixed(3)}%`
+  );
+}
+
+export async function runAssert(ctx: ActionContext, step: AssertStep): Promise<string | undefined> {
   const { handle } = ctx;
 
   if (step.type === "url-contains") {
@@ -27,6 +109,21 @@ export async function runAssert(ctx: ActionContext, step: AssertStep): Promise<v
       );
     }
     return;
+  }
+
+  // 视觉断言：fullPage 可无 target，元素模式自行解析
+  if (step.type === "screenshot-match") {
+    if (!step.target && !step.fullPage) {
+      throw new Error("assert screenshot-match 缺少 target（或设 fullPage: true）");
+    }
+    let nodeId: number | null = null;
+    if (step.target) {
+      try {
+        nodeId = (await resolveTarget(handle, step.target, ctx.refs, { retryMs: ctx.resolveRetryMs })).backendNodeId;
+      } catch { nodeId = null; }
+      if (nodeId !== null) await ctx.onResolved?.(nodeId);
+    }
+    return await runScreenshotMatch(ctx, step, nodeId);
   }
 
   if (!step.target) throw new Error(`assert ${step.type} 缺少 target`);

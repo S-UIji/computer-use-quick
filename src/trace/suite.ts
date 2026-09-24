@@ -66,6 +66,10 @@ export interface RunSuiteOptions {
   runsDir?: string;
   /** 认证态（session 默认或调用方显式指定）；注入到每个运行 Context */
   auth?: AuthState;
+  /** 重录全部视觉基线并一律通过（等价 Playwright --update-snapshots） */
+  updateBaselines?: boolean;
+  /** 视觉基线根目录（默认 traces/baselines；测试指向临时目录） */
+  baselineRoot?: string;
 }
 
 /** 单次尝试：独立 Context 完整重跑 + 归档（失败时抓截图进现场包） */
@@ -83,7 +87,12 @@ async function attemptOnce(
     const trace = await loadTrace(path);
     const rec = await replayTrace({
       handle, tracker, collector, trace, vars: opts.vars,
-      slowMoMs: opts.slowMoMs, resolveRetryMs: opts.resolveRetryMs
+      slowMoMs: opts.slowMoMs, resolveRetryMs: opts.resolveRetryMs,
+      visual: {
+        traceName: trace.name,
+        updateBaselines: opts.updateBaselines,
+        baselineRoot: opts.baselineRoot
+      }
     });
 
     // 失败现场包：截图必须在 Context release 前抓
@@ -93,7 +102,8 @@ async function attemptOnce(
     }
     await archiveRun({
       traceName: trace.name, record: rec, trace,
-      screenshotBase64: screenshot, rootDir: opts.runsDir, suffix
+      screenshotBase64: screenshot, rootDir: opts.runsDir, suffix,
+      artifacts: rec.artifacts
     });
 
     return {

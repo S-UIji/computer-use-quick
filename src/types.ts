@@ -88,7 +88,7 @@ export type Step =
   | { action: "scroll"; target?: TargetRef; direction?: "up" | "down"; amount?: number }
   | { action: "wait"; until: WaitCondition; timeout?: number }
   | { action: "sleep"; ms: number }
-  | { action: "assert"; type: AssertType; target?: TargetRef; expected?: string }
+  | { action: "assert"; type: AssertType; target?: TargetRef; expected?: string } & ScreenshotAssertOptions
   | { action: "extract"; target: TargetRef; as: string; from?: "text" | "value" };
 
 /** batch 里用 ref（本次快照的短期句柄）；trace 里用 descriptor（长期） */
@@ -100,7 +100,31 @@ export type WaitCondition =
   | { type: "url-contains"; value: string }
   | { type: "response"; urlPattern: string };
 
-export type AssertType = "visible" | "hidden" | "text-equals" | "text-contains" | "url-contains";
+export type AssertType = "visible" | "hidden" | "text-equals" | "text-contains" | "url-contains" | "screenshot-match";
+
+/** screenshot-match 断言的可选参数 */
+export interface ScreenshotAssertOptions {
+  /** true 时截整页（默认截 target 元素区域） */
+  fullPage?: boolean;
+  /** 差异像素占比阈值（0-1），默认 0.001（0.1%） */
+  threshold?: number;
+}
+
+/** 视觉断言链路的运行配置（replay/suite 下传，batch 探索模式落 _explore/） */
+export interface VisualOptions {
+  /** 基线归属的用例名（trace 名）；探索模式为 undefined → _explore/ */
+  traceName?: string;
+  /** true 时重录全部基线并一律通过（等价 Playwright --update-snapshots） */
+  updateBaselines?: boolean;
+  /** 基线根目录，默认 traces/baselines */
+  baselineRoot?: string;
+}
+
+/** 失败现场产物（如视觉断言三图），随 run-record 流转、归档时落成文件 */
+export interface RunArtifact {
+  name: string;
+  base64: string;
+}
 
 export interface StepResult {
   index: number;
@@ -151,6 +175,8 @@ export interface RunRecord {
   drifts: Array<{ index: number; expected: string; actual: string }>;
   failure?: FailureContext;
   healRequired: boolean;
+  /** 失败现场产物（视觉断言三图等）；归档时落成文件，不进 run-record.json */
+  artifacts?: RunArtifact[];
 }
 
 // ---------- 自愈 ----------

@@ -71,6 +71,13 @@ heal 历史留在 `<trace>.heal.jsonl` 供审计。只修定位类失败（找�
 断言失败会被拒绝：那可能是被测系统的真 bug。同一步最多 2 次尝试、一轮最多 3 处，
 超出转人工。
 
+**视觉断言**：`assert` 支持 `type: "screenshot-match"`——元素区域（或 `fullPage: true`
+整页）截图与基线逐像素比对，差异超阈值即失败（归为 `assert-failed`，heal 拒修）。
+基线存 `traces/baselines/<用例名>/`，按 descriptor 哈希命名（heal 换步不移位）；
+首次运行自动建基线，页面改版属预期时用 `updateBaselines: true` 重录。
+失败时 actual/expected/diff 三图随运行归档，可直接判读差异位置。
+基线对环境敏感（字体/DPR），请在目标运行环境（CI）生成。
+
 ## 快照长什么样
 
 结构相同的重复单元会被折叠，只列出各项的区别性内容：
@@ -162,7 +169,7 @@ node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1�
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（32 个文件 / 250 个测试）
+npm test                  # 先 tsc 构建再跑全部（33 个文件 / 262 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```

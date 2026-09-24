@@ -85,6 +85,8 @@ export interface RunHealOptions {
   dryRun: boolean;
   /** 认证态：验证门 Context 与正式回放一致注入（登录态 trace 否则必挂） */
   auth?: AuthState;
+  /** 视觉基线根目录（测试指向临时目录；验证门与正式回放共用同一套基线） */
+  baselineRoot?: string;
 }
 
 /**
@@ -117,7 +119,9 @@ export async function runHeal(opts: RunHealOptions): Promise<HealOutcome> {
     if (opts.auth) await applyAuth(vHandle, opts.auth);
     validation = await replayTrace({
       handle: vHandle, tracker: vTracker, collector: vCollector,
-      trace: healed, vars: opts.vars
+      trace: healed, vars: opts.vars,
+      // 验证门按 trace 名归位基线目录：视觉断言与正式回放比同一套基线
+      visual: { traceName: opts.trace.name, baselineRoot: opts.baselineRoot }
     });
   } finally {
     await release();
