@@ -21,9 +21,9 @@
 
 | 项 | 内容 | 状态 |
 |---|---|---|
-| A | 失败现场归档：run-record 落盘 + 失败步截图/快照 → `traces/runs/` | 待做 |
-| B | 单条重试：套件层自动重试 1 次 + `retryOf`/flaky 标记 | 待做 |
-| C | 认证态复用：storageState 保存/注入（省每条用例的登录） | 待做 |
+| A | 失败现场归档：run-record 落盘 + 失败步截图/快照 → `traces/runs/` | ✅ 2026-09-24（ci-trust-batch1） |
+| B | 单条重试：套件层自动重试 1 次 + `retryOf`/flaky 标记 | ✅ 2026-09-24（ci-trust-batch1） |
+| C | 认证态复用：storageState 保存/注入（省每条用例的登录） | ✅ 2026-09-24（ci-trust-batch1） |
 | D | 截图断言：`screenshot-match` + 基线管理（视觉回归） | 待做 |
 | E | 用例元数据：tags/description + suite 按标签/目录选择 | 待做 |
 | F | HTML 报告 + 历史趋势（依赖 A 的 run 落盘） | 待做 |

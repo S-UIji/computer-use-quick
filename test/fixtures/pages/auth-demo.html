@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>认证演示</title></head>
+<body>
+  <main>
+    <h1>认证演示</h1>
+    <button id="login">登录</button>
+    <div id="protected" hidden>机密内容</div>
+  </main>
+  <script>
+    function restore() {
+      if (localStorage.getItem("cuq_token")) {
+        document.getElementById("protected").hidden = false;
+      }
+    }
+    restore();
+    document.getElementById("login").addEventListener("click", () => {
+      document.cookie = "cuq_auth=1; path=/";
+      localStorage.setItem("cuq_token", "abc123");
+      restore();
+    });
+  </script>
+</body></html>

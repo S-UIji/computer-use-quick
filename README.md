@@ -49,7 +49,8 @@ npm run build
 | `discard_steps` | 探索走了弯路时，丢弃已记录的步骤（最近 N 步或全部），再 `save_trace` |
 | `save_trace` | 探索完，把成功的步骤固化成可回放用例 |
 | `replay` | 跑已有用例。CI 回归用这个，全程不调模型 |
-| `replay_suite` | 并行回放多条 trace：每条独立 BrowserContext（零共享 cookie），跑完全部再汇总；失败上下文可直接接 `heal_step`。`concurrency` 默认 3、上限 8 |
+| `replay_suite` | 并行回放多条 trace：每条独立 BrowserContext（零共享 cookie），失败自动完整重试 1 次（flaky 标记），跑完全部再汇总；失败上下文可直接接 `heal_step`。`concurrency` 默认 3、上限 8 |
+| `save_auth` | 把当前页面登录态（cookie + localStorage）存为认证态文件并设为 session 默认，replay/suite/heal 验证门自动注入——用例不必每次从头登录 |
 | `heal_step` | 回放失败后的自愈：演示修正步 → 独立 Context 全量重放验证 → 全绿才写回 trace。`assert-failed` 服务端拒修（可能是真 bug） |
 | `inspect` | 只在排查失败时用。取截图/console/网络 |
 
@@ -136,7 +137,9 @@ node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1�
 ```
 
 批量报告末行是机读收尾行 `SUITE_RESULT ok=N failed=M total=K wall_ms=D`，
-流水线 grep 它拿退出依据。自愈有服务端护栏：只修定位类失败、单步≤2 次、
+流水线 grep 它拿退出依据。每次运行的 run-record 落盘 `traces/runs/<时间戳>-<用例名>/`
+（gitignored），失败附现场包（截图 + 快照 + trace 副本）；认证态用 `save_auth`
+捕获一次后自动注入，用例不必每条都登录。自愈有服务端护栏：只修定位类失败、单步≤2 次、
 一轮≤3 处、断言失败拒修（转人工），全自动写回前必过独立 Context 验证门。
 
 ## 已知边界（一期）
@@ -159,7 +162,7 @@ node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1�
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（32 个文件 / 244 个测试）
+npm test                  # 先 tsc 构建再跑全部（32 个文件 / 250 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```

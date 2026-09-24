@@ -7,6 +7,7 @@ import { NetworkTracker } from "../waiter/stability.js";
 import { DiagnosticsCollector } from "../diagnostics/collector.js";
 import { replayTrace } from "./replay.js";
 import { atomicWriteTrace, appendHealRecord } from "./store.js";
+import { applyAuth, type AuthState } from "../session/auth.js";
 
 /** 可自愈的失败类型。assert-failed 不在列：断言失败可能是被测系统真缺陷，自动改期望等于掩盖 bug */
 export const HEALABLE_KINDS: ReadonlySet<FailureKind> = new Set([
@@ -82,6 +83,8 @@ export interface RunHealOptions {
   demoSteps: Step[];
   vars: Record<string, string>;
   dryRun: boolean;
+  /** 认证态：验证门 Context 与正式回放一致注入（登录态 trace 否则必挂） */
+  auth?: AuthState;
 }
 
 /**
@@ -111,6 +114,7 @@ export async function runHeal(opts: RunHealOptions): Promise<HealOutcome> {
   try {
     const vTracker = await NetworkTracker.attach(vHandle);
     const vCollector = await DiagnosticsCollector.attach(vHandle);
+    if (opts.auth) await applyAuth(vHandle, opts.auth);
     validation = await replayTrace({
       handle: vHandle, tracker: vTracker, collector: vCollector,
       trace: healed, vars: opts.vars

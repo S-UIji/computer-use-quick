@@ -1,5 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { BrowserSession } from "./session/browser.js";
 import type { RunRecord, Step } from "./types.js";
 import { takeSnapshot } from "./perception/snapshot.js";
@@ -11,8 +13,10 @@ import { saveTrace, loadTrace } from "./trace/store.js";
 import { replayTrace } from "./trace/replay.js";
 import { checkHealGate, runHeal, renderDemoFailure, type HealBudget } from "./trace/heal.js";
 import { checkConcurrency, runSuite } from "./trace/suite.js";
+import { archiveRun } from "./report/archive.js";
 import { renderSuiteResult } from "./report/suiteReport.js";
 import { renderRunRecord } from "./report/runRecord.js";
+import { captureAuth, applyAuth, loadAuth, type AuthState } from "./session/auth.js";
 
 /** 最近一次 snapshot 的 ref 表，按 pageId 保存，供 batch 用 ref 指代元素 */
 export const refTables = new Map<string, Map<string, number>>();
@@ -28,6 +32,20 @@ export const healBudgets = new Map<string, HealBudget>();
 
 /** 每个 pageId 上一次 snapshot 的渲染文本，snapshot diff 的对比基线 */
 export const lastSnapshots = new Map<string, string>();
+
+/** session 默认认证态：save_auth 设置，replay/suite/heal 注入链路共享 */
+let sessionAuth: AuthState | undefined;
+
+/** auth 解析：显式路径优先，否则 session 默认；显式路径加载失败返回错误文案 */
+async function resolveAuth(
+  explicitPath?: string
+): Promise<{ auth?: AuthState; error?: string }> {
+  if (explicitPath === undefined) return { auth: sessionAuth };
+  const auth = await loadAuth(explicitPath);
+  return auth
+    ? { auth }
+    : { error: `auth 文件 ${explicitPath} 不存在或结构非法` };
+}
 
 export function recordSteps(pageId: string, capturedSteps: Step[]): void {
   const acc = sessionSteps.get(pageId) ?? [];
@@ -262,14 +280,23 @@ export function createServer(session: BrowserSession): McpServer {
           .describe("每步之间的延迟，演示场景用，默认 0"),
         resolveRetryMs: z.number().int().min(0).optional()
           .describe("目标解析的轮询重试预算，默认 3000ms；传 0 恢复一次性解析"),
-        pageId: z.string().optional()
+        pageId: z.string().optional(),
+        auth: z.string().optional()
+          .describe("认证态文件路径；省略则用 save_auth 设置的 session 默认")
       }
     },
-    async ({ tracePath, vars, slowMoMs, resolveRetryMs, pageId }) => {
+    async ({ tracePath, vars, slowMoMs, resolveRetryMs, pageId, auth }) => {
       const handle = await session.getPage(pageId);
       const collector = await DiagnosticsCollector.attach(handle);
       const tracker = await NetworkTracker.attach(handle);
       collector.clear();
+
+      const { auth: authState, error: authError } = await resolveAuth(auth);
+      if (authError) {
+        return { isError: true, content: [{ type: "text" as const, text: authError }] };
+      }
+      // 认证态注入抢在 replay 的 navigate 之前——localStorage 播种随新文档生效
+      if (authState) await applyAuth(handle, authState);
 
       const trace = await loadTrace(tracePath);
       const rec = await replayTrace({
@@ -279,6 +306,12 @@ export function createServer(session: BrowserSession): McpServer {
       // 全绿 = 新一轮修复周期开始，自愈预算清零；失败则记下，供 heal_step 消费
       lastRunByTrace.set(tracePath, rec);
       if (rec.ok) healBudgets.delete(tracePath);
+
+      // 归档：run-record 总是落盘；失败附现场包（截图 + 快照 + trace 副本）
+      let screenshot: string | undefined;
+      if (!rec.ok) screenshot = await collector.screenshot().catch(() => undefined);
+      await archiveRun({ traceName: trace.name, record: rec, trace, screenshotBase64: screenshot });
+
       return { content: [{ type: "text" as const, text: renderRunRecord(rec) }] };
     }
   );
@@ -299,19 +332,26 @@ export function createServer(session: BrowserSession): McpServer {
         vars: z.record(z.string()).optional().describe("变量表，全部用例共享；凭证从这里传"),
         slowMoMs: z.number().int().min(0).optional().describe("每步之间的延迟，演示用"),
         resolveRetryMs: z.number().int().min(0).optional()
-          .describe("目标解析的轮询重试预算，默认 3000ms")
+          .describe("目标解析的轮询重试预算，默认 3000ms"),
+        auth: z.string().optional()
+          .describe("认证态文件路径；省略则用 save_auth 设置的 session 默认")
       }
     },
-    async ({ tracePaths, concurrency, vars, slowMoMs, resolveRetryMs }) => {
+    async ({ tracePaths, concurrency, vars, slowMoMs, resolveRetryMs, auth }) => {
       // 上限校验前置：不建任何浏览器资源就拒绝
       const gate = checkConcurrency(concurrency);
       if (!gate.ok) {
         return { isError: true, content: [{ type: "text" as const, text: gate.reason }] };
       }
+      const { auth: authState, error: authError } = await resolveAuth(auth);
+      if (authError) {
+        return { isError: true, content: [{ type: "text" as const, text: authError }] };
+      }
       const result = await runSuite({
         session, paths: tracePaths,
         vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
-        concurrency: gate.value, slowMoMs, resolveRetryMs
+        concurrency: gate.value, slowMoMs, resolveRetryMs,
+        auth: authState
       });
       // 逐 trace 记账：suite 的结果对 heal_step 直接可见，语义等价于各跑过一次单条 replay。
       // 成功 trace 同时清自愈预算——全绿即开启新一轮修复周期
@@ -347,10 +387,12 @@ export function createServer(session: BrowserSession): McpServer {
         dryRun: z.boolean().optional()
           .describe("true 时只验证不写回（不落盘、不记 heal 历史、不耗预算），默认 false"),
         pageId: z.string().optional().describe("演示执行的页面，省略则用当前选中页"),
+        auth: z.string().optional()
+          .describe("认证态文件路径；省略则用 save_auth 设置的 session 默认"),
         vars: z.record(z.string()).optional().describe("变量表，供 ${VAR} 插值；凭证从这里传")
       }
     },
-    async ({ tracePath, actions, step, stepIndex, dryRun, pageId, vars }) => {
+    async ({ tracePath, actions, step, stepIndex, dryRun, pageId, auth, vars }) => {
       const hasActions = actions !== undefined;
       const hasStep = step !== undefined;
       if (hasActions === hasStep) {
@@ -383,12 +425,18 @@ export function createServer(session: BrowserSession): McpServer {
       const tracker = await NetworkTracker.attach(handle);
       const refs = refTables.get(handle.pageId) ?? new Map<string, number>();
 
+      const { auth: authState, error: authError } = await resolveAuth(auth);
+      if (authError) {
+        return { isError: true, content: [{ type: "text" as const, text: authError }] };
+      }
+
       const outcome = await runHeal({
         session, handle, tracker, collector, refs,
         tracePath, trace, stepIndex: k,
         demoSteps: (hasActions ? actions! : [step!]) as unknown as Step[],
         vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
-        dryRun: dryRun ?? false
+        dryRun: dryRun ?? false,
+        auth: authState
       });
       refTables.set(handle.pageId, refs);
 
@@ -414,6 +462,32 @@ export function createServer(session: BrowserSession): McpServer {
       return { content: [{ type: "text" as const, text:
         `✅ 自愈成功：第 ${k + 1} 步已由 ${(hasActions ? actions! : [step!]).length} 步修复替换，${mode}。\n\n` +
         renderRunRecord(outcome.validation) }] };
+    }
+  );
+
+  server.registerTool(
+    "save_auth",
+    {
+      description:
+        "把当前页面的登录态（cookie + localStorage）保存为认证态文件并设为 session 默认。" +
+        "replay/replay_suite/heal 验证门会自动注入，用例不必每次从头登录。" +
+        "文件含凭证邻接数据，必须保持 gitignore（.cuq/）。登录过期后重新调用本工具即可。",
+      inputSchema: {
+        path: z.string().optional().describe("保存路径，默认 ./.cuq/auth.json"),
+        pageId: z.string().optional()
+      }
+    },
+    async ({ path, pageId }) => {
+      const handle = await session.getPage(pageId);
+      const auth = await captureAuth(handle);
+      const p = path ?? "./.cuq/auth.json";
+      await mkdir(dirname(p), { recursive: true });
+      await writeFile(p, JSON.stringify(auth, null, 2) + "\n", "utf8");
+      sessionAuth = auth;
+      const lsCount = auth.origins.reduce((a, o) => a + Object.keys(o.localStorage).length, 0);
+      return { content: [{ type: "text" as const, text:
+        `已保存认证态到 ${p}（cookie ${auth.cookies.length} 条，localStorage ${lsCount} 项）。` +
+        `后续 replay/replay_suite/heal 默认注入；登录过期后重新调用本工具。` }] };
     }
   );
 

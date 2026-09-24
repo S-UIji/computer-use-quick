@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, inject } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrowserSession } from "../../src/session/browser.js";
 import { runSuite } from "../../src/trace/suite.js";
+import { renderSuiteResult } from "../../src/report/suiteReport.js";
 import { loadTrace, saveTrace } from "../../src/trace/store.js";
+import { captureAuth, applyAuth } from "../../src/session/auth.js";
 import type { Trace } from "../../src/types.js";
 
 let session: BrowserSession;
@@ -165,4 +167,142 @@ describe("并行压测基线（任务 4.3）", () => {
     console.log(`[suite-bench] serial=${serialMs}ms parallel=${parMs}ms speedup=${(serialMs / parMs).toFixed(2)}x`);
     expect(parMs).toBeLessThan(serialMs * 0.7);
   }, 60_000);
+});
+
+describe("运行归档（任务 1.3）", () => {
+  it("成功与失败运行都落 run-record；失败附现场包三件套", async () => {
+    const d = await tmp();
+    const runs = join(d, "runs");
+    const paths = await writeTraces(d, [goodTrace("arch-ok"), brokenTrace("arch-bad")]);
+    const r = await runSuite({ session, paths, vars: {}, concurrency: 2, runsDir: runs });
+    expect(r.ok).toBe(1);
+
+    // 失败条会自动重试：arch-bad 有首败与 -retry 两份归档
+    const dirs = await readdir(runs);
+    expect(dirs).toHaveLength(3);
+    const okDir = dirs.find((x) => x.includes("arch-ok"))!;
+    const badDir = dirs.find((x) => x.includes("arch-bad") && !x.endsWith("-retry"))!;
+    // 成功运行：仅 run-record
+    expect(await readdir(join(runs, okDir))).toEqual(["run-record.json"]);
+    // 失败运行：run-record + 截图 + 快照 + trace 副本
+    expect((await readdir(join(runs, badDir))).sort())
+      .toEqual(["run-record.json", "screenshot.png", "snapshot.txt", "trace.json"]);
+  }, 30_000);
+
+  it("归档失败不影响运行结果（旁路语义）", async () => {
+    const d = await tmp();
+    const fileAsDir = join(d, "blocker");
+    await writeFile(fileAsDir, "不是目录", "utf8"); // 在其下建目录必失败
+    const paths = await writeTraces(d, [goodTrace("arch-fail")]);
+    const r = await runSuite({ session, paths, vars: {}, concurrency: 1, runsDir: fileAsDir });
+    expect(r.ok).toBe(1); // 归档失败，运行结果照常
+  }, 30_000);
+});
+
+describe("单条重试（任务 2.3）", () => {
+  it("首败重试通过 → flaky 标记 + 聚合报告体现 + 两次尝试各归档", async () => {
+    const d = await tmp();
+    const runs = join(d, "runs");
+    // /api/flaky-once 进程内首调 500：首 attempt 的 assert 挂，重试（200）通过
+    const trace: Trace = {
+      name: "flaky-trace", baseUrl: fx.url, createdAt: "2026-09-24T00:00:00.000Z",
+      steps: [
+        { action: "navigate", url: "/flaky.html" },
+        { action: "click", target: { descriptor: {
+          strategies: [{ kind: "css" as const, value: "#load" }], framePath: []
+        } } },
+        { action: "assert", type: "text-contains" as const,
+          target: { descriptor: { strategies: [{ kind: "css" as const, value: "#out" }], framePath: [] } },
+          expected: "加载成功" }
+      ]
+    };
+    const tracePath = await saveTrace(d, trace);
+    const r = await runSuite({ session, paths: [tracePath], vars: {}, concurrency: 1, runsDir: runs });
+
+    expect(r.ok).toBe(1);
+    expect(r.flaky).toBe(1);
+    expect(r.results[0].attempts).toBe(2);
+    expect(r.results[0].flaky).toBe(true);
+
+    const text = renderSuiteResult(r);
+    expect(text).toContain("flaky");
+    // 两次尝试各归档一份，第二份带 -retry 后缀
+    const dirs = await readdir(runs);
+    expect(dirs).toHaveLength(2);
+    expect(dirs.some((x) => x.endsWith("-retry"))).toBe(true);
+  }, 30_000);
+
+  it("重试仍失败 → attempts=2 按失败处理", async () => {
+    const d = await tmp();
+    const runs = join(d, "runs");
+    const paths = await writeTraces(d, [brokenTrace("retry-broken")]);
+    const r = await runSuite({ session, paths, vars: {}, concurrency: 1, runsDir: runs });
+
+    expect(r.failed).toBe(1);
+    expect(r.results[0].attempts).toBe(2);
+    expect(r.results[0].flaky).toBeUndefined();
+    expect(r.results[0].record?.failure?.kind).toBe("target-not-found");
+    // 两次失败尝试都归档（现场包各一份）
+    expect(await readdir(runs)).toHaveLength(2);
+    // 重试不消耗自愈预算（suite 层不触碰 healBudgets，结构性保证）
+  }, 30_000);
+});
+
+describe("认证态（任务 3.4）", () => {
+  const loginDemo = async () => {
+    const h = await session.getPage();
+    await h.page.goto(`${fx.url}/auth-demo.html`, { waitUntil: "load" });
+    await h.cdp.send("Runtime.evaluate", {
+      expression: `document.getElementById("login").click()`, returnByValue: true
+    });
+    return h;
+  };
+
+  it("捕获→注入：新 Context 恢复登录态（cookie + localStorage）", async () => {
+    const h = await loginDemo();
+    const auth = await captureAuth(h);
+    expect(auth.cookies.some((c) => c.name === "cuq_auth")).toBe(true);
+    expect(auth.origins[0]?.localStorage.cuq_token).toBe("abc123");
+
+    const { handle, release } = await session.newIsolatedPage();
+    try {
+      await applyAuth(handle, auth);
+      await handle.page.goto(`${fx.url}/auth-demo.html`, { waitUntil: "load" });
+      const { result } = await handle.cdp.send("Runtime.evaluate", {
+        expression: `JSON.stringify({ cookie: document.cookie, token: localStorage.getItem("cuq_token") })`,
+        returnByValue: true
+      });
+      const v = JSON.parse((result as { value: string }).value);
+      expect(v.cookie).toContain("cuq_auth=1");
+      expect(v.token).toBe("abc123");
+    } finally {
+      await release();
+    }
+  }, 30_000);
+
+  it("套件注入：无 auth 失败、有 auth 通过", async () => {
+    const d = await tmp();
+    const trace: Trace = {
+      name: "auth-trace", baseUrl: fx.url, createdAt: "2026-09-24T00:00:00.000Z",
+      steps: [
+        { action: "navigate", url: "/auth-demo.html" },
+        { action: "assert", type: "visible" as const,
+          target: { descriptor: { strategies: [{ kind: "css" as const, value: "#protected" }], framePath: [] } } }
+      ]
+    };
+    const tracePath = await saveTrace(d, trace);
+
+    // 无 auth：#protected 不渲染 → 失败
+    const r1 = await runSuite({ session, paths: [tracePath], vars: {}, concurrency: 1, runsDir: join(d, "runs1") });
+    expect(r1.failed).toBe(1);
+
+    // 捕获登录态后注入：通过
+    const h = await loginDemo();
+    const auth = await captureAuth(h);
+    const r2 = await runSuite({
+      session, paths: [tracePath], vars: {}, concurrency: 1,
+      runsDir: join(d, "runs2"), auth
+    });
+    expect(r2.ok).toBe(1);
+  }, 30_000);
 });

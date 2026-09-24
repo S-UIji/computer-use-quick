@@ -6,14 +6,16 @@ import { renderRunRecord } from "./runRecord.js";
  * 失败上下文不截断——它的下一个消费者是 heal_step，信息少了会让自愈多烧模型 turn。
  */
 export function renderSuiteResult(r: SuiteResult): string {
+  const flakyPart = r.flaky > 0 ? `（flaky ${r.flaky}）` : "";
   const lines: string[] = [
-    `# replay_suite：${r.total} 条 — ${r.ok} 成功 / ${r.failed} 失败，墙钟 ${(r.durationMs / 1000).toFixed(1)}s`,
+    `# replay_suite：${r.total} 条 — ${r.ok} 成功 / ${r.failed} 失败${flakyPart}，墙钟 ${(r.durationMs / 1000).toFixed(1)}s`,
     ""
   ];
 
   for (const t of r.results) {
     if (t.ok) {
-      lines.push(`✓ ${t.name} — ${t.stepCount} 步，${(t.durationMs / 1000).toFixed(1)}s，漂移 ${t.driftCount}`);
+      const mark = t.flaky ? `✓ ${t.name}（flaky，重试后通过）` : `✓ ${t.name}`;
+      lines.push(`${mark} — ${t.stepCount} 步，${(t.durationMs / 1000).toFixed(1)}s，漂移 ${t.driftCount}`);
     } else if (t.error !== undefined) {
       lines.push(`✗ ${t.name} — 未预期异常：${t.error}`);
     } else {

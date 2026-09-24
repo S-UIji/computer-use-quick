@@ -65,11 +65,11 @@ describe("MCP server（真实 stdio 协议）", () => {
     expect(r.result.serverInfo).toMatchObject({ name: "computer-use-quick", version: "0.1.0" });
   });
 
-  it("tools/list 恰好暴露九个工具", async () => {
+  it("tools/list 恰好暴露十个工具", async () => {
     send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     const names = (await wait(2)).result.tools.map((t: { name: string }) => t.name).sort();
     expect(names).toEqual(
-      ["batch", "discard_steps", "heal_step", "inspect", "list_pages", "replay", "replay_suite", "save_trace", "snapshot"]
+      ["batch", "discard_steps", "heal_step", "inspect", "list_pages", "replay", "replay_suite", "save_auth", "save_trace", "snapshot"]
     );
   });
 
