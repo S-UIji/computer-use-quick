@@ -47,6 +47,17 @@ export function discardSteps(pageId: string, count?: number): number {
   return n;
 }
 
+/** 会话步骤规模告警阈值：超过即在 batch/save_trace 响应中显形（只提示，不动数据） */
+export const STEP_WARN_THRESHOLD = 200;
+
+/** 超阈值时的告警行；未超返回 undefined（纯函数，便于单测） */
+export function stepOverflowWarning(count: number): string | undefined {
+  return count > STEP_WARN_THRESHOLD
+    ? `⚠ 本页已记录 ${count} 步（超过 ${STEP_WARN_THRESHOLD}）：` +
+      `探索弯路请先 discard_steps 再 save_trace，避免弯路固化进 trace`
+    : undefined;
+}
+
 export function createServer(session: BrowserSession): McpServer {
   const server = new McpServer({ name: "computer-use-quick", version: "0.1.0" });
 
@@ -146,6 +157,8 @@ export function createServer(session: BrowserSession): McpServer {
       if (r.ok) {
         const total = r.results.reduce((a, s) => a + s.durationMs, 0);
         const warnings = r.results.filter((s) => s.error).map((s) => `第 ${s.index + 1} 步：${s.error}`);
+        const overflow = stepOverflowWarning(sessionSteps.get(handle.pageId)?.length ?? 0);
+        if (overflow) warnings.push(overflow);
         return { content: [{ type: "text" as const, text:
           `✅ ${r.results.length} 步全部成功（合计 ${total}ms）\n` +
           (warnings.length ? `\n⚠ ${warnings.join("\n⚠ ")}\n` : "") +
@@ -229,7 +242,9 @@ export function createServer(session: BrowserSession): McpServer {
       const path = await saveTrace(dir ?? "./traces", {
         name, baseUrl, createdAt: new Date().toISOString(), steps
       });
-      return { content: [{ type: "text" as const, text: `已保存 ${steps.length} 步到 ${path}` }] };
+      const overflow = stepOverflowWarning(steps.length);
+      return { content: [{ type: "text" as const, text:
+        `已保存 ${steps.length} 步到 ${path}` + (overflow ? `\n${overflow}` : "") }] };
     }
   );
 

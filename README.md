@@ -159,7 +159,7 @@ node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1�
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（31 个文件 / 239 个测试）
+npm test                  # 先 tsc 构建再跑全部（32 个文件 / 244 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```

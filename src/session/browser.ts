@@ -19,12 +19,38 @@ function targetIdOf(page: Page): string {
 export class BrowserSession {
   private handles = new Map<string, PageHandle>();
   private selected?: string;
+  private browserCdp?: CDPSession;
 
   private constructor(private browser: Browser) {}
 
   static async connect(browserURL: string): Promise<BrowserSession> {
     const browser = await puppeteer.connect({ browserURL, defaultViewport: null });
-    return new BrowserSession(browser);
+    const session = new BrowserSession(browser);
+    await session.watchTargets();
+    return session;
+  }
+
+  /**
+   * 浏览器级会话监听 target 销毁：被外部关闭（用户关标签页、页面崩溃）的页面，
+   * 句柄条目与 CDP 会话引用在这里自动清掉。页面级会话收不到别的 target 的事件，
+   * 必须在浏览器级会话上开 discover。
+   */
+  private async watchTargets(): Promise<void> {
+    const browserCdp = await this.browser.target().createCDPSession();
+    this.browserCdp = browserCdp;
+    await browserCdp.send("Target.setDiscoverTargets", { discover: true });
+    browserCdp.on("Target.targetDestroyed", (e: { targetId: string }) => {
+      const handle = this.handles.get(e.targetId);
+      if (!handle) return; // 未入表的 target（用户自己的标签页等）安全跳过
+      this.handles.delete(e.targetId);
+      if (this.selected === e.targetId) this.selected = undefined;
+      handle.cdp.detach().catch(() => {}); // 页面已死，detach 失败可安全忽略
+    });
+  }
+
+  /** 内部句柄表规模（测试可观测性锚点） */
+  handleCount(): number {
+    return this.handles.size;
   }
 
   async listPages(): Promise<Array<{ pageId: string; title: string; url: string }>> {
@@ -115,6 +141,7 @@ export class BrowserSession {
       await h.cdp.detach().catch(() => {});
     }
     this.handles.clear();
+    await this.browserCdp?.detach().catch(() => {});
     this.browser.disconnect();
   }
 }
