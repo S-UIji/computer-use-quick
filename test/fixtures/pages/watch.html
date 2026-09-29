@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>观察模式</title>
+<style>
+  body { margin: 0; font: 14px sans-serif; }
+  /* 放在角标正下方：验证标注不拦截点击、不触发命中检测兜底 */
+  #under { position: fixed; top: 6px; left: 50%; transform: translateX(-50%); width: 240px; height: 32px; }
+  main { padding: 80px 24px 24px; }
+</style></head>
+<body>
+  <button type="button" id="under">角标下方的按钮</button>
+  <main>
+    <h1>观察模式测试页</h1>
+    <input id="name" aria-label="名字">
+    <p id="hit">未点击</p>
+    <p id="late-holder"></p>
+  </main>
+  <script>
+    document.getElementById("under").addEventListener("click", function (e) {
+      document.getElementById("hit").textContent = e.isTrusted ? "trusted" : "untrusted";
+    });
+    // ?late=毫秒：延迟插入 #late，给「长步骤期间模拟用户点击」留时间窗
+    var late = Number(new URLSearchParams(location.search).get("late") || 0);
+    if (late > 0) setTimeout(function () {
+      var s = document.createElement("span");
+      s.id = "late";
+      s.textContent = "迟到的元素";
+      document.getElementById("late-holder").appendChild(s);
+    }, late);
+  </script>
+</body></html>

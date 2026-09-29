@@ -24,6 +24,18 @@ export async function startFixtureServer(port = 0) {
     // 永不返回的接口：验证在途请求的导航清场与僵尸驱逐
     if (path === "/api/hang") return;
 
+    // 严格 CSP 页：页面自己的内联 <style> 会被拦，验证标注样式不受 style-src 影响
+    if (path === "/csp.html") {
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "content-security-policy": "default-src 'self'; style-src 'self'; script-src 'self'"
+      }).end(
+        '<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>严格 CSP</title>' +
+        "<style>h1 { color: rgb(255, 0, 0); }</style></head><body><h1>严格 CSP</h1></body></html>"
+      );
+      return;
+    }
+
     // 进程内首次 500 之后 200：验证套件层单条重试的 flaky 标记（测试进程生命周期内有状态）
     if (path === "/api/flaky-once") {
       flakyHits += 1;
