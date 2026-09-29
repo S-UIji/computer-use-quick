@@ -1,4 +1,5 @@
 import type { PageHandle } from "../session/browser.js";
+import { withOverlayHidden } from "../watch/overlay.js";
 
 const MAX = 20;
 
@@ -60,9 +61,12 @@ export class DiagnosticsCollector {
   clear(): void { this.consoleBuf = []; this.networkBuf = []; }
 
   async screenshot(): Promise<string> {
-    const { data } = (await this.handle.cdp.send("Page.captureScreenshot", {
-      format: "png"
-    })) as { data: string };
-    return data;
+    // 失败现场截图、inspect 截图都不该拍进观察模式标注
+    return withOverlayHidden(this.handle, async () => {
+      const { data } = (await this.handle.cdp.send("Page.captureScreenshot", {
+        format: "png"
+      })) as { data: string };
+      return data;
+    });
   }
 }

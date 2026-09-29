@@ -2,6 +2,7 @@ import type { PageHandle } from "../session/browser.js";
 import type { NetworkTracker } from "../waiter/stability.js";
 import type { DiagnosticsCollector } from "../diagnostics/collector.js";
 import type { FailureContext, FailureKind, RunArtifact, Step, StepResult, VisualOptions } from "../types.js";
+import { describeInterruption, type StepObserver } from "./observer.js";
 import { runAction, type ActionContext } from "./actions.js";
 import type { StabilityOptions } from "../waiter/stability.js";
 import { runAssert, AssertionFailure } from "../assertion/assert.js";
@@ -25,6 +26,8 @@ export interface BatchOptions {
   resolveRetryMs?: number;
   /** 视觉断言链路配置（screenshot-match 基线归属与更新模式） */
   visual?: VisualOptions;
+  /** 步骤生命周期钩子（标注 / 进度 / 介入检测）；省略即不观察 */
+  observer?: StepObserver;
 }
 
 export interface BatchResult {
@@ -60,7 +63,33 @@ function classify(err: unknown): {
   return { kind: "action-failed", message };
 }
 
+/** 失败上下文：抓快照（失败不掩盖原始错误）+ console 报错 + 失败请求，一次给全 */
+async function failureAt(
+  opts: BatchOptions,
+  index: number,
+  step: Step,
+  kind: FailureKind,
+  message: string,
+  candidates?: string[]
+): Promise<FailureContext> {
+  let snapshotText = "（快照获取失败）";
+  try {
+    snapshotText = (await takeSnapshot(opts.handle)).text;
+  } catch { /* 快照失败不该掩盖原始错误 */ }
+  return {
+    failedIndex: index,
+    failedStep: step,
+    kind,
+    message,
+    snapshot: snapshotText,
+    candidates: candidates?.slice(0, 10),
+    consoleErrors: opts.collector.consoleErrors(),
+    failedRequests: opts.collector.failedRequests()
+  };
+}
+
 export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
+  const obs = opts.observer;
   const ctx: ActionContext = {
     handle: opts.handle,
     tracker: opts.tracker,
@@ -69,11 +98,18 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
     stability: opts.stability,
     resolveRetryMs: opts.resolveRetryMs ?? 3000,
     visual: opts.visual,
-    artifacts: []
+    artifacts: [],
+    inputGate: obs?.inputGate
   };
 
   const results: StepResult[] = [];
   const capturedSteps: Step[] = [];
+  const fail = (failure: FailureContext): BatchResult => ({
+    ok: false, results, vars: ctx.vars, snapshot: failure.snapshot,
+    capturedSteps, artifacts: ctx.artifacts ?? [], failure
+  });
+
+  await obs?.onRunStart(opts.steps.length);
 
   for (let i = 0; i < opts.steps.length; i++) {
     const raw = opts.steps[i];
@@ -81,6 +117,7 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
     const notes: string[] = [];
     ctx.onResolved = undefined;
     ctx.lastWaitTimedOut = undefined;
+    await obs?.onStepStart(i, raw);
 
     try {
       const step = interpolateStep(raw, ctx.vars);
@@ -138,7 +175,19 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
         capturedSteps.push(captured);
       }
 
-      results.push({
+      // 介入检测在步骤边界结算：本步期间的用户操作归到本步
+      const interruption = obs?.takeInterruption();
+      const scrolls = obs?.takeScrollCount() ?? 0;
+      const isLast = i === opts.steps.length - 1;
+      if (scrolls > 0) notes.push(`执行期间检测到用户滚动 ${scrolls} 次（未中止）`);
+      if (interruption && isLast) {
+        // 所有步骤与断言都已通过，不因事后操作改判，只显形
+        notes.push(`执行期间检测到用户操作（${describeInterruption(interruption)}），所有步骤已完成，结果仍有效`);
+      } else if (interruption && opts.captureDescriptors !== false) {
+        notes.push("执行期间有用户操作，save_trace 前请确认这一步");
+      }
+
+      const result: StepResult = {
         index: i,
         action: raw.action,
         ok: true,
@@ -149,38 +198,37 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
           raw.action === "sleep" ? "使用了固定 sleep，建议改为显式 wait 条件" : "",
           ...notes
         ].filter(Boolean).join("；") || undefined
-      });
+      };
+      results.push(result);
       ctx.lastResolve = undefined;
+      await obs?.onStepEnd(result);
+
+      if (interruption && !isLast) {
+        // 说明里不写步号：回放开 slowMo 时批次序号与 trace 真实序号不同，步号由渲染层按 failedIndex 显示
+        const failure = await failureAt(
+          opts, i + 1, opts.steps[i + 1], "user-interrupted",
+          `检测到用户操作（${describeInterruption(interruption)}），已在上一步完成后停止，本步未执行`
+        );
+        await obs?.onRunEnd({ ok: false, failedIndex: i + 1, interrupted: true });
+        return fail(failure);
+      }
     } catch (err) {
       ctx.onResolved = undefined;
-      const { kind, message, candidates } = classify(err);
-      results.push({
+      const c = classify(err);
+      const interruption = obs?.takeInterruption();
+      obs?.takeScrollCount(); // 失败即结束，滚动计数一并清掉
+      const kind: FailureKind = interruption ? "user-interrupted" : c.kind;
+      const message = interruption
+        ? `本步执行期间检测到用户操作（${describeInterruption(interruption)}）；原始错误：${c.kind}：${c.message}`
+        : c.message;
+      const result: StepResult = {
         index: i, action: raw.action, ok: false, durationMs: Date.now() - t0, error: message
-      });
-
-      let snapshotText = "（快照获取失败）";
-      try {
-        snapshotText = (await takeSnapshot(opts.handle)).text;
-      } catch { /* 快照失败不该掩盖原始错误 */ }
-
-      return {
-        ok: false,
-        results,
-        vars: ctx.vars,
-        snapshot: snapshotText,
-        capturedSteps,
-        artifacts: ctx.artifacts ?? [],
-        failure: {
-          failedIndex: i,
-          failedStep: raw,
-          kind,
-          message,
-          snapshot: snapshotText,
-          candidates: candidates?.slice(0, 10),
-          consoleErrors: opts.collector.consoleErrors(),
-          failedRequests: opts.collector.failedRequests()
-        }
       };
+      results.push(result);
+      await obs?.onStepEnd(result);
+      const failure = await failureAt(opts, i, raw, kind, message, c.candidates);
+      await obs?.onRunEnd({ ok: false, failedIndex: i, interrupted: interruption !== undefined });
+      return fail(failure);
     }
   }
 
@@ -188,5 +236,6 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
   opts.refs.clear();
   for (const [k, v] of final.refs) opts.refs.set(k, v);
 
+  await obs?.onRunEnd({ ok: true, interrupted: false });
   return { ok: true, results, vars: ctx.vars, snapshot: final.text, capturedSteps, artifacts: ctx.artifacts ?? [] };
 }

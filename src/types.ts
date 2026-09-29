@@ -144,7 +144,8 @@ export type FailureKind =
   | "timeout"
   | "assert-failed"
   | "navigation-failed"
-  | "action-failed";
+  | "action-failed"
+  | "user-interrupted";
 
 export interface FailureContext {
   failedIndex: number;

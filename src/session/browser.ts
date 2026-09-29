@@ -1,4 +1,6 @@
 import puppeteer, { type Browser, type Page, type CDPSession } from "puppeteer-core";
+import { parseWatchSetting, resolveWatchEnabled } from "../watch/mode.js";
+import { removeAllOverlays } from "../watch/overlay.js";
 
 export interface PageHandle {
   pageId: string;
@@ -16,16 +18,32 @@ function targetIdOf(page: Page): string {
   return t._targetId ?? page.url();
 }
 
+/** 按 CUQ_WATCH 与浏览器 UA 判定观察模式；任何异常都按未启用处理 */
+async function detectWatch(browser: Browser): Promise<boolean> {
+  const { setting, warning } = parseWatchSetting(process.env.CUQ_WATCH);
+  if (warning) console.error(`[computer-use-quick] ${warning}`);
+  if (setting !== "auto") return setting === "on";
+  try {
+    return resolveWatchEnabled(setting, await browser.userAgent());
+  } catch (err) {
+    console.error(
+      `[computer-use-quick] 有头/无头判定失败，观察模式不启用：${err instanceof Error ? err.message : String(err)}`
+    );
+    return false;
+  }
+}
+
 export class BrowserSession {
   private handles = new Map<string, PageHandle>();
   private selected?: string;
   private browserCdp?: CDPSession;
 
-  private constructor(private browser: Browser) {}
+  /** watchEnabled：观察模式（页面标注 + 介入检测）是否启用，连接时判定一次 */
+  private constructor(private browser: Browser, readonly watchEnabled: boolean) {}
 
-  static async connect(browserURL: string): Promise<BrowserSession> {
+  static async connect(browserURL: string, opts: { watch?: boolean } = {}): Promise<BrowserSession> {
     const browser = await puppeteer.connect({ browserURL, defaultViewport: null });
-    const session = new BrowserSession(browser);
+    const session = new BrowserSession(browser, opts.watch ?? await detectWatch(browser));
     await session.watchTargets();
     return session;
   }
@@ -51,6 +69,11 @@ export class BrowserSession {
   /** 内部句柄表规模（测试可观测性锚点） */
   handleCount(): number {
     return this.handles.size;
+  }
+
+  /** 当前登记在册的全部页面句柄（服务端退出时清理标注用） */
+  allHandles(): PageHandle[] {
+    return [...this.handles.values()];
   }
 
   async listPages(): Promise<Array<{ pageId: string; title: string; url: string }>> {
@@ -137,6 +160,8 @@ export class BrowserSession {
   }
 
   async close(): Promise<void> {
+    // 断开前撤掉本 session 挂过的观察模式标注（总时长封顶 1s）：连接一断就没人能再清，残留会误导用户
+    await removeAllOverlays([...this.handles.values()]);
     for (const h of this.handles.values()) {
       await h.cdp.detach().catch(() => {});
     }

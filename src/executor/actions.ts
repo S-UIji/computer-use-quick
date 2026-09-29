@@ -3,6 +3,7 @@ import type { ResolveResult, RunArtifact, Step, TargetRef, VisualOptions } from 
 import { resolveTarget, type ResolveOptions } from "../locator/resolve.js";
 import { NetworkTracker, waitStable, type StabilityOptions } from "../waiter/stability.js";
 import { waitFor } from "../waiter/explicit.js";
+import type { InputGate } from "./observer.js";
 
 export interface ActionContext {
   handle: PageHandle;
@@ -26,6 +27,8 @@ export interface ActionContext {
    * 这个时机是最后的安全窗口——动作可能把页面导航走。
    */
   onResolved?: (backendNodeId: number) => Promise<void>;
+  /** agent 输入登记口（观察模式介入检测用）；未启用时为空，sendInput 直接派发 */
+  inputGate?: InputGate;
 }
 
 async function centerOf(
@@ -66,6 +69,27 @@ async function bringToFront(handle: PageHandle): Promise<void> {
   await handle.cdp.send("Page.bringToFront").catch(() => {});
 }
 
+type InputMethod = "Input.dispatchMouseEvent" | "Input.dispatchKeyEvent" | "Input.insertText";
+
+/**
+ * 所有 Input.* 派发的唯一出口：介入检测靠它登记 agent 输入的时间窗与坐标，
+ * 才能把页面上报的可信事件分成「agent 自己的」和「用户的」。关闭放在 finally，派发抛错也不留常开窗口。
+ */
+async function sendInput(ctx: ActionContext, method: InputMethod, params: Record<string, unknown>): Promise<void> {
+  const kind = method === "Input.dispatchMouseEvent"
+    ? (params.type === "mouseWheel" ? "wheel" : "mouse")
+    : "key";
+  const point = typeof params.x === "number" && typeof params.y === "number"
+    ? { x: params.x, y: params.y }
+    : undefined;
+  const done = ctx.inputGate?.begin(kind, point);
+  try {
+    await (ctx.handle.cdp as unknown as { send(m: string, p: object): Promise<unknown> }).send(method, params);
+  } finally {
+    done?.();
+  }
+}
+
 /**
  * 经 CDP Input 域派发真实鼠标事件（spec §2.1）。这里派发的是浏览器级
  * trusted event，前端 JS 分辨不出来；但不做鼠标轨迹动画和人类化延迟。
@@ -80,7 +104,8 @@ async function bringToFront(handle: PageHandle): Promise<void> {
  * CDP 事件保证了 hover/focus/mousedown/mouseup 链是 trusted；JS click
  * 保证 DOM click 事件命中正确的元素。
  */
-async function realClick(handle: PageHandle, backendNodeId: number): Promise<void> {
+async function realClick(ctx: ActionContext, backendNodeId: number): Promise<void> {
+  const { handle } = ctx;
   const { x, y } = await centerOf(handle, backendNodeId);
 
   // hit-test：检查目标元素是否在点击坐标的可视位置
@@ -106,11 +131,11 @@ async function realClick(handle: PageHandle, backendNodeId: number): Promise<voi
 
   const hitTarget = hitResult.value;
 
-  await handle.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
-  await handle.cdp.send("Input.dispatchMouseEvent", {
+  await sendInput(ctx, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+  await sendInput(ctx, "Input.dispatchMouseEvent", {
     type: "mousePressed", x, y, button: "left", clickCount: 1
   });
-  await handle.cdp.send("Input.dispatchMouseEvent", {
+  await sendInput(ctx, "Input.dispatchMouseEvent", {
     type: "mouseReleased", x, y, button: "left", clickCount: 1
   });
 
@@ -171,7 +196,7 @@ export async function runAction(ctx: ActionContext, step: Step): Promise<void> {
 
     case "click": {
       await bringToFront(handle);
-      await realClick(handle, await nodeIdFor(ctx, step.target, ACTIONABLE));
+      await realClick(ctx, await nodeIdFor(ctx, step.target, ACTIONABLE));
       break;
     }
 
@@ -182,11 +207,11 @@ export async function runAction(ctx: ActionContext, step: Step): Promise<void> {
       await handle.cdp.send("DOM.focus", { backendNodeId: id });
       // 全选后插入：走真实输入路径，会正常触发 input/change
       for (const type of ["keyDown", "keyUp"] as const) {
-        await handle.cdp.send("Input.dispatchKeyEvent", {
+        await sendInput(ctx, "Input.dispatchKeyEvent", {
           type, modifiers: 2, key: "a", code: "KeyA", windowsVirtualKeyCode: 65
         });
       }
-      await handle.cdp.send("Input.insertText", { text: step.value });
+      await sendInput(ctx, "Input.insertText", { text: step.value });
       break;
     }
 
@@ -214,15 +239,15 @@ export async function runAction(ctx: ActionContext, step: Step): Promise<void> {
 
     case "press": {
       await bringToFront(handle);
-      await handle.cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: step.key });
-      await handle.cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: step.key });
+      await sendInput(ctx, "Input.dispatchKeyEvent", { type: "keyDown", key: step.key });
+      await sendInput(ctx, "Input.dispatchKeyEvent", { type: "keyUp", key: step.key });
       break;
     }
 
     case "hover": {
       await bringToFront(handle);
       const { x, y } = await centerOf(handle, await nodeIdFor(ctx, step.target, ACTIONABLE));
-      await handle.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+      await sendInput(ctx, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
       break;
     }
 
@@ -234,7 +259,7 @@ export async function runAction(ctx: ActionContext, step: Step): Promise<void> {
         });
       } else {
         const delta = (step.amount ?? 400) * (step.direction === "up" ? -1 : 1);
-        await handle.cdp.send("Input.dispatchMouseEvent", {
+        await sendInput(ctx, "Input.dispatchMouseEvent", {
           type: "mouseWheel", x: 10, y: 10, deltaX: 0, deltaY: delta
         });
       }

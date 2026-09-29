@@ -1,5 +1,6 @@
 import { basename } from "node:path";
-import type { BrowserSession } from "../session/browser.js";
+import type { BrowserSession, PageHandle } from "../session/browser.js";
+import type { StepObserver } from "../executor/observer.js";
 import { NetworkTracker } from "../waiter/stability.js";
 import { DiagnosticsCollector } from "../diagnostics/collector.js";
 import type { RunRecord } from "../types.js";
@@ -42,7 +43,12 @@ export interface SuiteTraceResult {
   attempts: number;
   /** 首次失败、重试通过——抖动而非真挂 */
   flaky?: boolean;
+  /** 被用户打断（观察模式介入检测）：用户在场，不自动重试 */
+  interrupted?: true;
 }
+
+/** 用例级进度事件：首次失败即将重试发 retrying，最终结果发 done */
+export type TraceEvent = { kind: "retrying" | "done"; result: SuiteTraceResult };
 
 export interface SuiteResult {
   total: number;
@@ -70,6 +76,10 @@ export interface RunSuiteOptions {
   updateBaselines?: boolean;
   /** 视觉基线根目录（默认 traces/baselines；测试指向临时目录） */
   baselineRoot?: string;
+  /** 每次尝试的隔离页一个观察者（标注 + 介入检测）；省略即不观察 */
+  observerFor?: (handle: PageHandle, traceName: string) => StepObserver | undefined;
+  /** 用例级进度事件回调 */
+  onTraceEvent?: (e: TraceEvent) => void;
 }
 
 /** 单次尝试：独立 Context 完整重跑 + 归档（失败时抓截图进现场包） */
@@ -92,7 +102,8 @@ async function attemptOnce(
         traceName: trace.name,
         updateBaselines: opts.updateBaselines,
         baselineRoot: opts.baselineRoot
-      }
+      },
+      observer: opts.observerFor?.(handle, trace.name)
     });
 
     // 失败现场包：截图必须在 Context release 前抓
@@ -127,12 +138,25 @@ async function attemptOnce(
   }
 }
 
-/** 单条运行：失败则用全新 Context 完整重跑 1 次，以最终结果为准 */
+const isInterrupted = (r: SuiteTraceResult): boolean => r.record?.failure?.kind === "user-interrupted";
+
+/** 单条运行：失败则用全新 Context 完整重跑 1 次，以最终结果为准；被用户打断不重试 */
 async function runOne(opts: RunSuiteOptions, path: string): Promise<SuiteTraceResult> {
+  const done = (r: SuiteTraceResult): SuiteTraceResult => {
+    opts.onTraceEvent?.({ kind: "done", result: r });
+    return r;
+  };
   const first = await attemptOnce(opts, path, "");
-  if (first.ok) return first;
+  if (first.ok) return done(first);
+  // 用户在场才会被打断：重试大概率再被打断，如实报告即可
+  if (isInterrupted(first)) return done({ ...first, interrupted: true });
+  opts.onTraceEvent?.({ kind: "retrying", result: first });
   const second = await attemptOnce(opts, path, "-retry");
-  return { ...second, flaky: second.ok || undefined };
+  return done({
+    ...second,
+    flaky: second.ok || undefined,
+    ...(isInterrupted(second) ? { interrupted: true as const } : {})
+  });
 }
 
 /**

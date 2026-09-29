@@ -158,6 +158,29 @@ node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1�
 捕获一次后自动注入，用例不必每条都登录。自愈有服务端护栏：只修定位类失败、单步≤2 次、
 一轮≤3 处、断言失败拒修（转人工），全自动写回前必过独立 Context 验证门。
 
+## 观察模式（有头时自动启用）
+
+连接的是有头 Chrome 时，服务端自动进入观察模式（`CUQ_WATCH=auto`，可设 `on` / `off` 覆盖）：
+
+- **只标被操作的页面**：执行中是紫色描边 + 顶部角标「🤖 computer-use-quick 正在操作 · {标签} · 第 i/N 步」；
+  两次调用之间退成淡色「⏸ 待命」；检测到用户介入后变红「✋ 执行已停止」。
+- **用户介入如实归因**：执行期间在被操作页面上点击或按键，会在步骤边界停下并报 `user-interrupted`
+  （不再误报成 `target-not-found`）。`heal_step` 拒修这类失败、不耗预算；`replay_suite` 不自动重试被打断的用例。
+  滚动只记告警、不中止；待命时可以随意操作（例如手动登录）。
+- **进度推送**：客户端在 `tools/call` 的 `_meta` 带 `progressToken` 时，batch/replay 按步、
+  replay_suite 按用例、heal_step 按「演示 → 验证门」推送 `notifications/progress`（与有头无头无关）。
+  Claude Code 的展示情况（据其 changelog 与 issue #86464，未在本项目实测）：前台调用时进度文字显示在工具调用行下方；
+  超过 120s 被转入后台的调用，2026-09 下旬之前的版本会丢弃进度，之后的版本在后台任务里显示最新进度。
+
+标注画在 `<html>` 下的封闭 Shadow DOM 里，不进快照、不拖隐式等待、不挡点击、截图时自动隐藏，
+生成的描述符与无标注时相同（均有集成测试覆盖）。headless 下不启用，CI 行为不变。
+
+标注的生命周期：「已被打断」的红色标注保留到下一次执行；服务端正常退出（客户端关闭 stdin、
+SIGTERM、Ctrl+C）或调用 `BrowserSession.close()` 时会先撤掉所有标注再断开。
+
+已知边界：`<dialog>` 模态框与全屏元素会盖过标注；服务端进程被强杀或崩溃时来不及清理，标注残留到页面刷新；
+跨进程 iframe 内的操作检测不到；上报只含事件类型与坐标，不含按键值。
+
 ## 已知边界（一期）
 
 - 只支持 Web。桌面端在三期，感知层已留可插拔接口。
@@ -178,7 +201,7 @@ node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1�
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（33 个文件 / 262 个测试）
+npm test                  # 先 tsc 构建再跑全部（46 个文件 / 336 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```

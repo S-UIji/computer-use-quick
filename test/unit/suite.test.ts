@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { checkConcurrency, runSuite, MAX_CONCURRENCY, DEFAULT_CONCURRENCY } from "../../src/trace/suite.js";
-import { renderSuiteResult } from "../../src/report/suiteReport.js";
+import { renderSuiteResult, renderTraceEvent } from "../../src/report/suiteReport.js";
 import type { SuiteResult } from "../../src/trace/suite.js";
 import type { RunRecord } from "../../src/types.js";
 
@@ -87,5 +87,40 @@ describe("renderSuiteResult 聚合报告", () => {
     expect(lines[lines.length - 1]).toBe("SUITE_RESULT ok=1 failed=2 total=3 wall_ms=12345");
     // 值纯数字无空格，grep/awk 零成本
     expect(lines[lines.length - 1]).toMatch(/^SUITE_RESULT ok=\d+ failed=\d+ total=\d+ wall_ms=\d+$/);
+  });
+});
+
+describe("被用户打断的用例", () => {
+  const interruptedRecord = {
+    traceName: "exp-3", startedAt: "", durationMs: 2400, ok: false, steps: [], drifts: [], healRequired: false,
+    failure: {
+      failedIndex: 7, failedStep: { action: "click" }, kind: "user-interrupted",
+      message: "检测到用户操作", snapshot: "snap", consoleErrors: [], failedRequests: []
+    }
+  } as unknown as RunRecord;
+  const r: SuiteResult = {
+    total: 1, ok: 0, failed: 1, flaky: 0, durationMs: 2400,
+    results: [{ path: "/e.json", name: "exp-3", ok: false, durationMs: 2400, stepCount: 7, driftCount: 0,
+      record: interruptedRecord, attempts: 1, interrupted: true }]
+  };
+
+  it("报告行用 ✋ 标明停在第几步，且不列入可自愈的失败上下文段", () => {
+    const text = renderSuiteResult(r);
+    expect(text).toContain("✋ exp-3 — 被用户打断（停在第 8 步）");
+    expect(text).not.toContain("## 失败上下文（可接 heal_step 自愈）");
+    expect(text).toContain("无需 heal_step");
+    expect(text.trim().split("\n").pop()).toBe("SUITE_RESULT ok=0 failed=1 total=1 wall_ms=2400");
+  });
+
+  it("renderTraceEvent：成功 / flaky / 被打断 / 失败 / 重试中", () => {
+    const base = { path: "/a.json", name: "a", durationMs: 2400, stepCount: 3, driftCount: 0, attempts: 1 };
+    const failRec = { ...interruptedRecord, failure: { ...interruptedRecord.failure!, kind: "target-not-found" } } as RunRecord;
+    expect(renderTraceEvent({ kind: "done", result: { ...base, ok: true } })).toBe("a ✓ 2.4s");
+    expect(renderTraceEvent({ kind: "done", result: { ...base, ok: true, flaky: true } })).toBe("a ✓ 2.4s（flaky）");
+    expect(renderTraceEvent({ kind: "done", result: { ...base, ok: false, interrupted: true, record: interruptedRecord } }))
+      .toBe("a ✋ 被用户打断");
+    expect(renderTraceEvent({ kind: "done", result: { ...base, ok: false, record: failRec } })).toBe("a ✗ target-not-found");
+    expect(renderTraceEvent({ kind: "retrying", result: { ...base, ok: false, record: failRec } }))
+      .toBe("a ✗ target-not-found，重试中");
   });
 });

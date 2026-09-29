@@ -63,4 +63,20 @@ describe("renderRunRecord", () => {
   it("无漂移时不输出漂移小节", () => {
     expect(renderRunRecord(base)).not.toContain("漂移");
   });
+
+  it("被用户打断：标题用 ✋ 并显示停在第几步，且不要求自愈", () => {
+    const md = renderRunRecord({
+      ...base,
+      ok: false,
+      healRequired: false,
+      failure: {
+        failedIndex: 1, failedStep: { action: "click", target: { ref: "e1" } }, kind: "user-interrupted",
+        message: "检测到用户操作（pointerdown @ 1,2），已在上一步完成后停止，本步未执行",
+        snapshot: "snap", consoleErrors: [], failedRequests: []
+      }
+    });
+    expect(md).toContain("✋ smoke-login 被用户打断 — 停在第 2 步");
+    expect(md).toContain("heal_required=false");
+    expect(md).not.toContain("❌");
+  });
 });
