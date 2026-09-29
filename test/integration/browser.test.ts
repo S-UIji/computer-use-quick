@@ -58,4 +58,25 @@ describe("BrowserSession", () => {
     const pages = await session.listPages();
     expect(pages.length).toBeGreaterThan(0); // getPage/listPages 行为不变
   });
+
+  it("观察模式：auto 连 headless 不启用，显式 watch 可覆盖", async () => {
+    const saved = process.env.CUQ_WATCH;
+    delete process.env.CUQ_WATCH; // 开发机上若设了 CUQ_WATCH，别让它干扰判定
+    try {
+      const auto = await BrowserSession.connect(inject("browserURL"));
+      expect(auto.watchEnabled).toBe(false);
+      await auto.close();
+
+      const forced = await BrowserSession.connect(inject("browserURL"), { watch: true });
+      expect(forced.watchEnabled).toBe(true);
+      await forced.close();
+    } finally {
+      if (saved !== undefined) process.env.CUQ_WATCH = saved;
+    }
+  });
+
+  it("allHandles 列出已登记的全部句柄", async () => {
+    const h = await session.getPage();
+    expect(session.allHandles()).toContain(h);
+  });
 });
