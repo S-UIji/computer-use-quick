@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, inject } from "vitest";
 import { BrowserSession } from "../../src/session/browser.js";
+import { showOverlay } from "../../src/watch/overlay.js";
 
 let session: BrowserSession;
 
@@ -78,5 +79,23 @@ describe("BrowserSession", () => {
   it("allHandles 列出已登记的全部句柄", async () => {
     const h = await session.getPage();
     expect(session.allHandles()).toContain(h);
+  });
+
+  it("close() 先撤掉本 session 挂过的观察模式标注再断开", async () => {
+    const other = await BrowserSession.connect(inject("browserURL"), { watch: true });
+    const h = await other.newPage();
+    await h.page.goto(`${inject("fixtureURL")}/watch.html`, { waitUntil: "load" });
+    await showOverlay(h, { kind: "interrupted", stopStep: 3 });
+    const pageId = h.pageId;
+    await other.close();
+
+    // 用另一条连接查：断开后页面上不应再有标注宿主
+    const viewer = await session.getPage(pageId);
+    const { result } = await viewer.cdp.send("Runtime.evaluate", {
+      expression: `document.querySelectorAll("cuq-overlay").length`,
+      returnByValue: true
+    });
+    expect(result.value).toBe(0);
+    await session.closePage(pageId);
   });
 });

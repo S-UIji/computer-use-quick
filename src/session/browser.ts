@@ -1,5 +1,6 @@
 import puppeteer, { type Browser, type Page, type CDPSession } from "puppeteer-core";
 import { parseWatchSetting, resolveWatchEnabled } from "../watch/mode.js";
+import { removeAllOverlays } from "../watch/overlay.js";
 
 export interface PageHandle {
   pageId: string;
@@ -159,6 +160,8 @@ export class BrowserSession {
   }
 
   async close(): Promise<void> {
+    // 断开前撤掉本 session 挂过的观察模式标注（总时长封顶 1s）：连接一断就没人能再清，残留会误导用户
+    await removeAllOverlays([...this.handles.values()]);
     for (const h of this.handles.values()) {
       await h.cdp.detach().catch(() => {});
     }
