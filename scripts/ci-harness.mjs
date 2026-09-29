@@ -1,6 +1,6 @@
 // CI 无人值守挂接点：基础设施 + 终判门。自愈循环由 CI agent 经 MCP 驱动，本脚本不自愈。
 //
-//   node scripts/ci-harness.mjs up                    起 headless Chrome，环境写入 .scratch/ci-env.json
+//   node scripts/ci-harness.mjs up [--headed]         起 Chrome（默认 headless；--headed 有头，供本地观察），环境写入 .scratch/ci-env.json
 //   node scripts/ci-harness.mjs gate [--traces dir]   对 traces 目录跑 replay_suite 终判，退出码 0/1，随后清理
 //   node scripts/ci-harness.mjs down                  手动清理（一般 gate 已代劳）
 //
@@ -17,6 +17,7 @@ const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const PORT = 9333;
 const ENV_FILE = resolve(".scratch/ci-env.json");
 const cmd = process.argv[2];
+const headed = process.argv.includes("--headed");
 
 function fail(msg) { console.error(`✗ ${msg}`); process.exit(2); }
 
@@ -39,13 +40,19 @@ function readEnv() {
 
 function cleanup(env) {
   try { execSync(`taskkill /PID ${env.chromePid} /T /F`, { stdio: "ignore" }); } catch { /* 尽力 */ }
-  for (let i = 0; i < 10; i++) {
+  // taskkill 返回时 Chrome 的文件句柄还没放完，不间隔的重试会在几毫秒内全部落空
+  let removed = false;
+  for (let i = 0; i < 10 && !removed; i++) {
     try {
       rmSync(env.profile, { recursive: true, force: true });
-      rmSync(ENV_FILE, { force: true });
-      return;
-    } catch { /* Windows 句柄释放竞态 */ }
+      removed = true;
+    } catch {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+    }
   }
+  // 环境文件无条件删：留着它会让下一次 up 被「已有环境文件」挡住
+  rmSync(ENV_FILE, { force: true });
+  if (!removed) console.error(`⚠ 临时 profile 未能删除，可手动清理：${env.profile}`);
 }
 
 if (cmd === "up") {
@@ -54,7 +61,7 @@ if (cmd === "up") {
   // detached + unref：Chrome 必须活过本进程——up 先退出、gate 后启动，
   // 不脱离进程组的话，node 退出时 Chrome 会跟着被回收
   const chrome = spawn(CHROME, [
-    "--headless=new",
+    ...(headed ? [] : ["--headless=new"]),
     `--remote-debugging-port=${PORT}`,
     `--user-data-dir=${profile}`,
     "--no-first-run", "--no-default-browser-check",
@@ -67,7 +74,7 @@ if (cmd === "up") {
     chromePid: chrome.pid,
     profile
   }, null, 2), "utf8");
-  console.log(`✓ Chrome 就绪：CUQ_BROWSER_URL=http://127.0.0.1:${PORT}（环境已写入 ${ENV_FILE}）`);
+  console.log(`✓ Chrome 就绪（${headed ? "有头" : "headless"}）：CUQ_BROWSER_URL=http://127.0.0.1:${PORT}（环境已写入 ${ENV_FILE}）`);
   process.exit(0);
 }
 

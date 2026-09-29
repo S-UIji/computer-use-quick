@@ -11,15 +11,21 @@ npm run build
 
 ## 启动被测浏览器
 
-服务端不自己启浏览器，而是连接一个已开调试端口的 Chrome：
+服务端不自己启浏览器，而是连接一个已开调试端口的 Chrome（有头、headless 均可）：
 
 ```bash
-# Windows
-"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
+# Windows（cmd）
+"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir=%LOCALAPPDATA%\cuq-chrome-profile
 
 # macOS
-/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222 --user-data-dir="$HOME/.cuq-chrome-profile"
 ```
+
+**`--user-data-dir` 必须带，且不能指向日常 Chrome 的默认目录**：Chrome 136 起，默认 profile 下
+`--remote-debugging-port` 会被静默忽略（防止恶意软件借调试端口窃取日常浏览器的 cookie/密码）。
+独立目录顺带避开另一个坑：日常 Chrome 已在运行时，同 profile 的启动参数会被转交给已有进程而丢弃。
+目录固定不变，手动登录一次后登录态就留在里面；它是全新 profile，不含日常书签与登录态。
+浏览器打开 `http://127.0.0.1:9222/json/version` 能看到 JSON 即就绪。
 
 ## 接入 Claude Code
 
@@ -141,6 +147,10 @@ node scripts/ci-harness.mjs up     # 起 headless Chrome，环境写入 .scratch
 #   replay_suite → 逐失败 heal_step → 全绿
 node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1，自动清理
 ```
+
+本地想看回放过程时用 `up --headed` 起有头 Chrome，每个隔离 Context 各开一个窗口。
+实测（6 条 × 16 步，3 并发）有头墙钟比 headless 慢约 9%，零失败零重试；
+窗口被最小化或完全遮挡时未验证，观察期间请保持窗口可见。视觉基线仍应在 headless 环境生成。
 
 批量报告末行是机读收尾行 `SUITE_RESULT ok=N failed=M total=K wall_ms=D`，
 流水线 grep 它拿退出依据。每次运行的 run-record 落盘 `traces/runs/<时间戳>-<用例名>/`
