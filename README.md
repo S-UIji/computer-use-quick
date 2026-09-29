@@ -2,8 +2,6 @@
 
 Web 端到端测试的 MCP 控制层。把「每步一次模型往返」换成「batch 压缩 + 零模型回放」。
 
-设计文档：[`docs/superpowers/specs/2026-09-11-computer-use-quick-design.md`](docs/superpowers/specs/2026-09-11-computer-use-quick-design.md)
-
 ## 安装与构建
 
 ```bash
@@ -59,8 +57,7 @@ npm run build
 **探索式测试**：`snapshot` 看页面 → `batch` 执行一批 → 再 `snapshot` 确认 → 循环。
 
 **固化**：探索通过后 `save_trace`，得到一个 JSON 文件，用 git 管起来。
-写 trace 时给每个意图步配断言（自愈验证门的语义天花板），配方见
-[`docs/trace-authoring.md`](docs/trace-authoring.md)。
+写 trace 时给每个意图步配断言（自愈验证门的语义天花板）。
 
 **回归**：`replay` 传 trace 路径。凭证通过 `vars` 或环境变量注入，**绝不写进 trace**——
 写了明文，`save_trace` 会直接拒绝保存。
@@ -118,8 +115,10 @@ run-record 里会出**漂移告警**——回放不算失败，但这是页面�
 ## 基准测试
 
 ```bash
-npm run bench -- ./traces/smoke-login.json
+npm run bench -- ./traces/<用例名>.json
 ```
+
+仓库不附带示例 trace（`traces/` 已 gitignore），先用 `save_trace` 对你的靶场录制一份。
 
 自动输出 A/B/C 三种方式的 turn 数与实测工具耗时对照。模型思考时间未计入——
 实际提速取决于模型往返速度（设计文档估算 3-10s/turn）。
@@ -139,7 +138,7 @@ npm run bench -- ./traces/smoke-login.json
 ```bash
 node scripts/ci-harness.mjs up     # 起 headless Chrome，环境写入 .scratch/ci-env.json
 #   CI agent 用环境里的 browserURL 配置 MCP，跑自愈循环：
-#   replay_suite → 逐失败 heal_step → 全绿（见 docs/ci-unattended-loop.md）
+#   replay_suite → 逐失败 heal_step → 全绿
 node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1，自动清理
 ```
 

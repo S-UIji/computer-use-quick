@@ -6,7 +6,7 @@
 //
 // pipeline 典型接法：
 //   1. ci-harness up
-//   2. CI agent 用 .scratch/ci-env.json 里的 browserURL 配置 MCP，跑自愈循环（见 docs/ci-unattended-loop.md）
+//   2. CI agent 用 .scratch/ci-env.json 里的 browserURL 配置 MCP，跑自愈循环
 //   3. ci-harness gate   ← 退出码即流水线退出码
 import { spawn, execSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, readdirSync } from "node:fs";

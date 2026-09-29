@@ -1,9 +1,15 @@
 // 一次性端到端验证：独立 Chrome（临时 profile + 9223）+ 真实 MCP stdio 协议 + 靶场 replay
 // 用法：node .scratch/e2e-replay.mjs
 import { spawn, execSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+
+const TRACE = "traces/smoke-login.json";
+if (!existsSync(TRACE)) {
+  console.error(`缺少 ${TRACE}：仓库不附带示例 trace，请先用 save_trace 对你的靶场录制一份再运行。`);
+  process.exit(1);
+}
 
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const PORT = 9223;
@@ -76,7 +82,7 @@ try {
   const t0 = Date.now();
   send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: {
     name: "replay",
-    arguments: { tracePath: resolve("traces/smoke-login.json") }
+    arguments: { tracePath: resolve(TRACE) }
   }});
   const r = await wait(3);
   console.log(`\n===== replay 结果（${Date.now() - t0}ms 往返）=====\n`);

@@ -8,5 +8,6 @@ test/bench/out/
 .agents/
 .codegraph/
 openspec/
-traces/runs/
+traces/
 .cuq/
+docs/

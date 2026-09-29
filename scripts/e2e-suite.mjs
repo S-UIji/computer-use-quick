@@ -1,9 +1,15 @@
 // 真实靶场压测：3 份 smoke-login 复制，replay_suite 串行 vs 3 并发对照
 // 用法：node scripts/e2e-suite.mjs
 import { spawn, execSync } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+
+const TRACE = "traces/smoke-login.json";
+if (!existsSync(TRACE)) {
+  console.error(`缺少 ${TRACE}：仓库不附带示例 trace，请先用 save_trace 对你的靶场录制一份再运行。`);
+  process.exit(1);
+}
 
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const PORT = 9223;
@@ -11,7 +17,7 @@ const profile = mkdtempSync(join(tmpdir(), "cuq-suite-"));
 const work = mkdtempSync(join(tmpdir(), "cuq-suite-traces-"));
 
 // 3 份 smoke-login 复制（名字不同，步骤相同）
-const base = JSON.parse(readFileSync("traces/smoke-login.json", "utf8"));
+const base = JSON.parse(readFileSync(TRACE, "utf8"));
 const paths = [];
 for (let i = 1; i <= 3; i++) {
   const p = join(work, `suite-${i}.json`);
