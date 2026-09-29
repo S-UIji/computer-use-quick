@@ -98,7 +98,8 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
     stability: opts.stability,
     resolveRetryMs: opts.resolveRetryMs ?? 3000,
     visual: opts.visual,
-    artifacts: []
+    artifacts: [],
+    inputGate: obs?.inputGate
   };
 
   const results: StepResult[] = [];

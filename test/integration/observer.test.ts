@@ -4,7 +4,7 @@ import { NetworkTracker } from "../../src/waiter/stability.js";
 import { DiagnosticsCollector } from "../../src/diagnostics/collector.js";
 import { runBatch } from "../../src/executor/batch.js";
 import type { Descriptor, Step } from "../../src/types.js";
-import { FakeObserver } from "../fixtures/fake-observer.js";
+import { FakeObserver, RecordingGate } from "../fixtures/fake-observer.js";
 
 let session: BrowserSession;
 let handle: PageHandle;
@@ -116,5 +116,34 @@ describe("runBatch 步骤钩子", () => {
 
     expect(r.ok).toBe(true);
     expect(r.results[1].error).toContain("用户滚动 2 次");
+  });
+});
+
+describe("sendInput 登记 agent 输入", () => {
+  it("点击/填写/按键/悬停/滚动全部经输入门登记，且每次登记都被关闭", async () => {
+    const gate = new RecordingGate();
+    const r = await run([
+      { action: "navigate", url: `${fx.url}/form.html` },
+      { action: "click", target: css("#submit") },
+      { action: "fill", target: css("#user"), value: "ab" },
+      { action: "press", key: "Tab" },
+      { action: "hover", target: css("#submit") },
+      { action: "scroll", direction: "down", amount: 100 }
+    ], new FakeObserver({ inputGate: gate }));
+
+    expect(r.ok).toBe(true);
+    expect(gate.begins.map((b) => b.kind)).toEqual([
+      "mouse", "mouse", "mouse", // click：moved / pressed / released
+      "key", "key", "key",       // fill：Ctrl+A 按下 / 抬起 + insertText
+      "key", "key",              // press：keyDown / keyUp
+      "mouse",                   // hover：moved
+      "wheel"                    // scroll：mouseWheel
+    ]);
+    const [a, b, c] = gate.begins;
+    expect(a.point?.x).toBeGreaterThan(0);
+    expect(b.point).toEqual(a.point);
+    expect(c.point).toEqual(a.point);
+    expect(gate.begins[9].point).toEqual({ x: 10, y: 10 });
+    expect(gate.closed).toBe(gate.begins.length);
   });
 });
