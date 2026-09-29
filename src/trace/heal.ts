@@ -1,4 +1,5 @@
 import type { BrowserSession, PageHandle } from "../session/browser.js";
+import type { StepObserver } from "../executor/observer.js";
 import type {
   FailureContext, FailureKind, HealOutcome, RunRecord, Step, Trace
 } from "../types.js";
@@ -37,6 +38,12 @@ export function checkHealGate(opts: {
   if (opts.lastFailureKind === undefined) {
     return { ok: false, reason: "该 trace 无失败记录，无法确认失败类型；请先 replay" };
   }
+  if (opts.lastFailureKind === "user-interrupted") {
+    return {
+      ok: false,
+      reason: "上次失败是用户介入导致的中断，不是页面问题：请重新 replay，确认失败仍存在再修复（未消耗自愈次数）"
+    };
+  }
   if (!HEALABLE_KINDS.has(opts.lastFailureKind)) {
     return {
       ok: false,
@@ -69,6 +76,11 @@ export function buildHealedTrace(
   return { ...trace, steps };
 }
 
+/** 验证重放失败是否计入自愈预算：被用户打断不算——那不是修复本身的问题 */
+export function validationCountsAgainstBudget(validation: RunRecord): boolean {
+  return validation.failure?.kind !== "user-interrupted";
+}
+
 export interface RunHealOptions {
   session: BrowserSession;
   /** 演示页 handle（replay 失败留下的页面，模型已在其上探索） */
@@ -87,6 +99,10 @@ export interface RunHealOptions {
   auth?: AuthState;
   /** 视觉基线根目录（测试指向临时目录；验证门与正式回放共用同一套基线） */
   baselineRoot?: string;
+  /** 演示执行的观察者（标注 + 介入检测 + 进度） */
+  demoObserver?: StepObserver;
+  /** 验证门隔离页的观察者工厂 */
+  validationObserverFor?: (handle: PageHandle) => StepObserver | undefined;
 }
 
 /**
@@ -101,7 +117,8 @@ export async function runHeal(opts: RunHealOptions): Promise<HealOutcome> {
     refs: opts.refs,
     vars: opts.vars,
     steps: opts.demoSteps,
-    captureDescriptors: true
+    captureDescriptors: true,
+    observer: opts.demoObserver
   });
   if (!demo.ok) {
     return { status: "demo-failed", stepIndex: opts.stepIndex, failure: demo.failure! };
@@ -121,7 +138,8 @@ export async function runHeal(opts: RunHealOptions): Promise<HealOutcome> {
       handle: vHandle, tracker: vTracker, collector: vCollector,
       trace: healed, vars: opts.vars,
       // 验证门按 trace 名归位基线目录：视觉断言与正式回放比同一套基线
-      visual: { traceName: opts.trace.name, baselineRoot: opts.baselineRoot }
+      visual: { traceName: opts.trace.name, baselineRoot: opts.baselineRoot },
+      observer: opts.validationObserverFor?.(vHandle)
     });
   } finally {
     await release();

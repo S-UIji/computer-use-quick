@@ -3,7 +3,7 @@ import { mkdtemp, rm, readFile, writeFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  checkHealGate, buildHealedTrace,
+  checkHealGate, buildHealedTrace, validationCountsAgainstBudget,
   MAX_ATTEMPTS_PER_STEP, MAX_HEALS_PER_TRACE, type HealBudget
 } from "../../src/trace/heal.js";
 import {
@@ -215,5 +215,26 @@ describe("heal sidecar", () => {
     // 模拟写回前留档：sidecar 里的 originalStep 应与写回前 trace 的第 k 步一致
     const loaded = await loadTrace(p);
     expect(loaded.steps[1]).toEqual(trace.steps[1]);
+  });
+});
+
+describe("用户介入与自愈", () => {
+  it("上次失败是 user-interrupted：拒修，提示重新 replay，不涉及预算", () => {
+    const r = checkHealGate({ lastFailureKind: "user-interrupted", budget: budget(), stepIndex: 0 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toContain("用户介入");
+      expect(r.reason).toContain("重新 replay");
+    }
+  });
+
+  it("验证重放被用户打断不计入预算，其余失败照常计入", () => {
+    const rec = (kind: "user-interrupted" | "target-not-found") => ({
+      traceName: "t", startedAt: "", durationMs: 1, ok: false, steps: [], drifts: [], healRequired: false,
+      failure: { failedIndex: 0, failedStep: { action: "sleep" as const, ms: 1 }, kind, message: "", snapshot: "",
+        consoleErrors: [], failedRequests: [] }
+    });
+    expect(validationCountsAgainstBudget(rec("user-interrupted"))).toBe(false);
+    expect(validationCountsAgainstBudget(rec("target-not-found"))).toBe(true);
   });
 });
