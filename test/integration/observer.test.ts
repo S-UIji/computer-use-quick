@@ -5,6 +5,8 @@ import { DiagnosticsCollector } from "../../src/diagnostics/collector.js";
 import { runBatch } from "../../src/executor/batch.js";
 import type { Descriptor, Step } from "../../src/types.js";
 import { FakeObserver, RecordingGate } from "../fixtures/fake-observer.js";
+import { replayTrace } from "../../src/trace/replay.js";
+import type { Trace } from "../../src/types.js";
 
 let session: BrowserSession;
 let handle: PageHandle;
@@ -145,5 +147,43 @@ describe("sendInput 登记 agent 输入", () => {
     expect(c.point).toEqual(a.point);
     expect(gate.begins[9].point).toEqual({ x: 10, y: 10 });
     expect(gate.closed).toBe(gate.begins.length);
+  });
+});
+
+describe("replayTrace 透传观察者", () => {
+  const trace = (): Trace => ({
+    name: "t", baseUrl: fx.url, createdAt: "",
+    steps: [
+      { action: "navigate", url: "/form.html" },
+      { action: "fill", target: css("#user"), value: "a" },
+      { action: "click", target: css("#submit") }
+    ]
+  });
+
+  it("slowMo 插入的 sleep 对观察者不可见，序号为 trace 真实序号", async () => {
+    const obs = new FakeObserver();
+    const rec = await replayTrace({ handle, tracker, collector, vars: {}, trace: trace(), slowMoMs: 30, observer: obs });
+    expect(rec.ok).toBe(true);
+    expect(obs.events).toEqual([
+      "start:3",
+      "step:0:navigate", "end:0:ok",
+      "step:1:fill", "end:1:ok",
+      "step:2:click", "end:2:ok",
+      "done:true:-:false"
+    ]);
+  });
+
+  it("中断点落在 slowMo 插入的 sleep 上：失败步换算为其后的真实步，且不要求自愈", async () => {
+    const t = trace();
+    // 第 0 次结算 = 真实第 0 步结束；批次里下一步是 slowMo 插入的 sleep
+    const obs = new FakeObserver({ interruptAt: 0 });
+    const rec = await replayTrace({ handle, tracker, collector, vars: {}, trace: t, slowMoMs: 30, observer: obs });
+
+    expect(rec.ok).toBe(false);
+    expect(rec.failure?.kind).toBe("user-interrupted");
+    expect(rec.failure?.failedIndex).toBe(1);
+    expect(rec.failure?.failedStep).toEqual(t.steps[1]);
+    expect(rec.healRequired).toBe(false);
+    expect(obs.events.at(-1)).toBe("done:false:1:true");
   });
 });

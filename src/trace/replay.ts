@@ -2,6 +2,7 @@ import type { PageHandle } from "../session/browser.js";
 import type { NetworkTracker } from "../waiter/stability.js";
 import type { DiagnosticsCollector } from "../diagnostics/collector.js";
 import type { RunRecord, Trace, Step, Descriptor, VisualOptions } from "../types.js";
+import type { StepObserver } from "../executor/observer.js";
 import { runBatch } from "../executor/batch.js";
 
 export interface ReplayOptions {
@@ -16,6 +17,8 @@ export interface ReplayOptions {
   resolveRetryMs?: number;
   /** 视觉断言链路配置（screenshot-match 基线归属与更新模式） */
   visual?: VisualOptions;
+  /** 步骤生命周期钩子（标注 / 进度 / 介入检测），看到的是 trace 真实步序号 */
+  observer?: StepObserver;
 }
 
 /** 把 trace 里的相对 url 补全成绝对地址 */
@@ -29,6 +32,34 @@ export function absolutize(step: Step, baseUrl: string): Step {
 function strategyKindAt(step: Step, index: number): string | undefined {
   const t = (step as { target?: { descriptor?: Descriptor } }).target;
   return t?.descriptor?.strategies[index]?.kind;
+}
+
+/** 批次序号 → trace 真实序号；落在 slowMo 插入的 sleep 上时取其后的第一个真实步 */
+function nextReal(realIndex: number[], k: number, total: number): number {
+  for (let j = k; j < realIndex.length; j++) {
+    if (realIndex[j] !== -1) return realIndex[j];
+  }
+  return total - 1;
+}
+
+/** slowMo 插入的 sleep 对观察者不可见，步序号换算回 trace 真实序号 */
+function remapObserver(obs: StepObserver, realIndex: number[], total: number): StepObserver {
+  return {
+    inputGate: obs.inputGate,
+    onRunStart: () => obs.onRunStart(total),
+    onStepStart: async (i, step) => {
+      if (realIndex[i] !== -1) await obs.onStepStart(realIndex[i], step);
+    },
+    onStepEnd: async (r) => {
+      if (realIndex[r.index] !== -1) await obs.onStepEnd({ ...r, index: realIndex[r.index] });
+    },
+    onRunEnd: (o) => obs.onRunEnd({
+      ...o,
+      failedIndex: o.failedIndex === undefined ? undefined : nextReal(realIndex, o.failedIndex, total)
+    }),
+    takeInterruption: () => obs.takeInterruption(),
+    takeScrollCount: () => obs.takeScrollCount()
+  };
 }
 
 export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
@@ -60,7 +91,8 @@ export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
     steps: withSlowMo,
     captureDescriptors: false,
     resolveRetryMs: opts.resolveRetryMs,
-    visual: opts.visual
+    visual: opts.visual,
+    observer: opts.observer ? remapObserver(opts.observer, realIndex, steps.length) : undefined
   });
 
   // 去掉 slowMo 插入的 sleep，序号换算回真实步序号
@@ -77,10 +109,12 @@ export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
     if (expected && actual) drifts.push({ index: s.index, expected, actual });
   }
 
-  // 失败上下文里的步序号同样换算回真实步序号
-  const failure = r.failure
-    ? { ...r.failure, failedIndex: realIndex[r.failure.failedIndex] }
-    : r.failure;
+  // 失败上下文里的步序号同样换算回真实步序号（介入中断可能落在插入的 sleep 上）
+  let failure = r.failure;
+  if (failure) {
+    const idx = nextReal(realIndex, failure.failedIndex, steps.length);
+    failure = { ...failure, failedIndex: idx, failedStep: steps[idx] };
+  }
 
   return {
     traceName: opts.trace.name,
@@ -90,7 +124,8 @@ export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
     steps: realResults,
     drifts,
     failure,
-    healRequired: !r.ok,
+    // 被用户打断不是页面问题，不进自愈流程
+    healRequired: !r.ok && failure?.kind !== "user-interrupted",
     artifacts: r.artifacts.length > 0 ? r.artifacts : undefined
   };
 }

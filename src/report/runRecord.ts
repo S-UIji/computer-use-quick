@@ -1,9 +1,12 @@
 import type { RunRecord } from "../types.js";
 
 export function renderRunRecord(rec: RunRecord): string {
+  const stopAt = (rec.failure?.failedIndex ?? 0) + 1;
   const head = rec.ok
     ? `✅ ${rec.traceName} 回放成功 — ${rec.steps.length} 步，合计 ${rec.durationMs}ms`
-    : `❌ ${rec.traceName} 回放失败 — 在第 ${(rec.failure?.failedIndex ?? 0) + 1} 步中断，已耗时 ${rec.durationMs}ms`;
+    : rec.failure?.kind === "user-interrupted"
+      ? `✋ ${rec.traceName} 被用户打断 — 停在第 ${stopAt} 步，已耗时 ${rec.durationMs}ms`
+      : `❌ ${rec.traceName} 回放失败 — 在第 ${stopAt} 步中断，已耗时 ${rec.durationMs}ms`;
 
   const lines = [`# ${head}`, "", "## 逐步耗时", ""];
   for (const s of rec.steps) {
