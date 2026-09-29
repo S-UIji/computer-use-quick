@@ -10,7 +10,7 @@ import { join } from "node:path";
  * 也就是模型实际看到的那层。前置：先跑过 npm run build。
  */
 let srv: ChildProcessWithoutNullStreams;
-const replies: Array<{ id?: number; result?: any; error?: any }> = [];
+const replies: Array<{ id?: number; result?: any; error?: any; method?: string; params?: any }> = [];
 let stderr = "";
 
 function send(o: unknown): void {
@@ -33,7 +33,7 @@ function wait(id: number, ms = 15_000): Promise<{ result?: any; error?: any }> {
 
 beforeAll(async () => {
   srv = spawn("node", ["dist/index.js"], {
-    env: { ...process.env, CUQ_BROWSER_URL: inject("browserURL") },
+    env: { ...process.env, CUQ_BROWSER_URL: inject("browserURL"), CUQ_WATCH: "auto" },
     stdio: ["pipe", "pipe", "pipe"]
   }) as ChildProcessWithoutNullStreams;
 
@@ -286,5 +286,46 @@ describe("MCP server（真实 stdio 协议）", () => {
     } finally {
       await rm(d, { recursive: true, force: true });
     }
+  });
+
+  it("进度推送：带 progressToken 时每步一条通知，按序到达", async () => {
+    send({ jsonrpc: "2.0", id: 40, method: "tools/call", params: {
+      name: "batch",
+      _meta: { progressToken: "prog-40" },
+      arguments: { steps: [
+        { action: "navigate", url: `${inject("fixtureURL")}/form.html` },
+        { action: "fill",
+          target: { descriptor: { strategies: [{ kind: "css", value: "#user" }], framePath: [] } },
+          value: "admin" }
+      ]}
+    }});
+    await wait(40);
+    const notes = replies.filter((r) => r.method === "notifications/progress" && r.params?.progressToken === "prog-40");
+    expect(notes.map((n) => n.params.progress)).toEqual([1, 2]);
+    expect(notes.every((n) => n.params.total === 2)).toBe(true);
+    expect(notes[0].params.message).toBe("第 1/2 步 navigate ✓");
+  });
+
+  it("不带 progressToken 时不推送任何进度", async () => {
+    const before = replies.filter((r) => r.method === "notifications/progress").length;
+    send({ jsonrpc: "2.0", id: 41, method: "tools/call", params: {
+      name: "batch",
+      arguments: { steps: [{ action: "navigate", url: `${inject("fixtureURL")}/form.html` }] }
+    }});
+    await wait(41);
+    expect(replies.filter((r) => r.method === "notifications/progress").length).toBe(before);
+  });
+
+  it("headless 默认不启用观察模式：页面上没有标注宿主", async () => {
+    send({ jsonrpc: "2.0", id: 42, method: "tools/call", params: {
+      name: "batch",
+      arguments: { steps: [
+        { action: "navigate", url: `${inject("fixtureURL")}/form.html` },
+        { action: "assert", type: "hidden",
+          target: { descriptor: { strategies: [{ kind: "css", value: "cuq-overlay" }], framePath: [] } } }
+      ]}
+    }});
+    const text = (await wait(42)).result.content[0].text;
+    expect(text).toContain("2 步全部成功");
   });
 });

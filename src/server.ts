@@ -11,12 +11,16 @@ import { NetworkTracker } from "./waiter/stability.js";
 import { runBatch } from "./executor/batch.js";
 import { saveTrace, loadTrace } from "./trace/store.js";
 import { replayTrace } from "./trace/replay.js";
-import { checkHealGate, runHeal, renderDemoFailure, type HealBudget } from "./trace/heal.js";
+import {
+  checkHealGate, runHeal, renderDemoFailure, validationCountsAgainstBudget, type HealBudget
+} from "./trace/heal.js";
 import { checkConcurrency, runSuite } from "./trace/suite.js";
 import { archiveRun } from "./report/archive.js";
-import { renderSuiteResult } from "./report/suiteReport.js";
+import { renderSuiteResult, renderTraceEvent } from "./report/suiteReport.js";
 import { renderRunRecord } from "./report/runRecord.js";
 import { captureAuth, applyAuth, loadAuth, type AuthState } from "./session/auth.js";
+import { RunWatch } from "./watch/runWatch.js";
+import { ProgressReporter } from "./watch/progress.js";
 
 /** 最近一次 snapshot 的 ref 表，按 pageId 保存，供 batch 用 ref 指代元素 */
 export const refTables = new Map<string, Map<string, number>>();
@@ -157,17 +161,21 @@ export function createServer(session: BrowserSession): McpServer {
         )
       }
     },
-    async ({ pageId, steps, vars, stability, resolveRetryMs }) => {
+    async ({ pageId, steps, vars, stability, resolveRetryMs }, extra) => {
       const handle = await session.getPage(pageId);
       const collector = await DiagnosticsCollector.attach(handle);
       const tracker = await NetworkTracker.attach(handle);
       const refs = refTables.get(handle.pageId) ?? new Map<string, number>();
 
+      const watch = new RunWatch({
+        handle, label: "探索", watch: session.watchEnabled, progress: ProgressReporter.from(extra)
+      });
       const r = await runBatch({
         handle, tracker, collector, refs,
         vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
         steps: steps as unknown as Step[],
-        stability, resolveRetryMs
+        stability, resolveRetryMs,
+        observer: watch
       });
       refTables.set(handle.pageId, refs);
       recordSteps(handle.pageId, r.capturedSteps);
@@ -177,6 +185,7 @@ export function createServer(session: BrowserSession): McpServer {
         const warnings = r.results.filter((s) => s.error).map((s) => `第 ${s.index + 1} 步：${s.error}`);
         const overflow = stepOverflowWarning(sessionSteps.get(handle.pageId)?.length ?? 0);
         if (overflow) warnings.push(overflow);
+        if (watch.setupWarning) warnings.push(watch.setupWarning);
         return { content: [{ type: "text" as const, text:
           `✅ ${r.results.length} 步全部成功（合计 ${total}ms）\n` +
           (warnings.length ? `\n⚠ ${warnings.join("\n⚠ ")}\n` : "") +
@@ -184,9 +193,13 @@ export function createServer(session: BrowserSession): McpServer {
       }
 
       const f = r.failure!;
+      const head = f.kind === "user-interrupted"
+        ? `✋ 第 ${f.failedIndex + 1} 步：user-interrupted（被用户打断，不是页面问题）`
+        : `❌ 第 ${f.failedIndex + 1} 步失败：${f.kind}`;
       // isError 让客户端在协议层就能看出失败，不必去解析文案
       return { isError: true, content: [{ type: "text" as const, text:
-        `❌ 第 ${f.failedIndex + 1} 步失败：${f.kind}\n${f.message}\n\n` +
+        `${head}\n${f.message}\n\n` +
+        (watch.setupWarning ? `⚠ ${watch.setupWarning}\n\n` : "") +
         `## 失败步骤\n${JSON.stringify(f.failedStep, null, 2)}\n\n` +
         (f.candidates?.length ? `## 同容器内的其它文字（可用于消歧）\n${f.candidates.join("\n")}\n\n` : "") +
         `## 当前快照\n${f.snapshot}\n\n` +
@@ -287,7 +300,7 @@ export function createServer(session: BrowserSession): McpServer {
           .describe("true 时重录全部视觉基线并一律通过（页面改版属预期时用），默认 false")
       }
     },
-    async ({ tracePath, vars, slowMoMs, resolveRetryMs, pageId, auth, updateBaselines }) => {
+    async ({ tracePath, vars, slowMoMs, resolveRetryMs, pageId, auth, updateBaselines }, extra) => {
       const handle = await session.getPage(pageId);
       const collector = await DiagnosticsCollector.attach(handle);
       const tracker = await NetworkTracker.attach(handle);
@@ -301,10 +314,15 @@ export function createServer(session: BrowserSession): McpServer {
       if (authState) await applyAuth(handle, authState);
 
       const trace = await loadTrace(tracePath);
+      const watch = new RunWatch({
+        handle, label: trace.name, watch: session.watchEnabled,
+        progress: ProgressReporter.from(extra), progressPrefix: `${trace.name} · `
+      });
       const rec = await replayTrace({
         handle, tracker, collector, trace, slowMoMs, resolveRetryMs,
         vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
-        visual: { traceName: trace.name, updateBaselines }
+        visual: { traceName: trace.name, updateBaselines },
+        observer: watch
       });
       // 全绿 = 新一轮修复周期开始，自愈预算清零；失败则记下，供 heal_step 消费
       lastRunByTrace.set(tracePath, rec);
@@ -315,7 +333,8 @@ export function createServer(session: BrowserSession): McpServer {
       if (!rec.ok) screenshot = await collector.screenshot().catch(() => undefined);
       await archiveRun({ traceName: trace.name, record: rec, trace, screenshotBase64: screenshot });
 
-      return { content: [{ type: "text" as const, text: renderRunRecord(rec) }] };
+      return { content: [{ type: "text" as const,
+        text: renderRunRecord(rec) + (watch.setupWarning ? `\n\n⚠ ${watch.setupWarning}` : "") }] };
     }
   );
 
@@ -342,7 +361,7 @@ export function createServer(session: BrowserSession): McpServer {
           .describe("true 时重录全部视觉基线并一律通过，默认 false")
       }
     },
-    async ({ tracePaths, concurrency, vars, slowMoMs, resolveRetryMs, auth, updateBaselines }) => {
+    async ({ tracePaths, concurrency, vars, slowMoMs, resolveRetryMs, auth, updateBaselines }, extra) => {
       // 上限校验前置：不建任何浏览器资源就拒绝
       const gate = checkConcurrency(concurrency);
       if (!gate.ok) {
@@ -352,12 +371,20 @@ export function createServer(session: BrowserSession): McpServer {
       if (authError) {
         return { isError: true, content: [{ type: "text" as const, text: authError }] };
       }
+      const progress = ProgressReporter.from(extra);
+      let doneCount = 0;
       const result = await runSuite({
         session, paths: tracePaths,
         vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
         concurrency: gate.value, slowMoMs, resolveRetryMs,
         auth: authState,
-        updateBaselines
+        updateBaselines,
+        // 每个隔离页各自标注自己的用例；步骤级进度在并发下会交错，只推用例级进度
+        observerFor: (handle, name) => new RunWatch({ handle, label: name, watch: session.watchEnabled }),
+        onTraceEvent: (e) => {
+          if (e.kind === "done") doneCount += 1;
+          progress.report(doneCount, tracePaths.length, renderTraceEvent(e));
+        }
       });
       // 逐 trace 记账：suite 的结果对 heal_step 直接可见，语义等价于各跑过一次单条 replay。
       // 成功 trace 同时清自愈预算——全绿即开启新一轮修复周期
@@ -398,7 +425,7 @@ export function createServer(session: BrowserSession): McpServer {
         vars: z.record(z.string()).optional().describe("变量表，供 ${VAR} 插值；凭证从这里传")
       }
     },
-    async ({ tracePath, actions, step, stepIndex, dryRun, pageId, auth, vars }) => {
+    async ({ tracePath, actions, step, stepIndex, dryRun, pageId, auth, vars }, extra) => {
       const hasActions = actions !== undefined;
       const hasStep = step !== undefined;
       if (hasActions === hasStep) {
@@ -436,13 +463,25 @@ export function createServer(session: BrowserSession): McpServer {
         return { isError: true, content: [{ type: "text" as const, text: authError }] };
       }
 
+      const demoSteps = (hasActions ? actions! : [step!]) as unknown as Step[];
+      const progress = ProgressReporter.from(extra);
+      // 两阶段进度：演示步 + 修复后 trace 的全量重放（演示步全部固化时恰好等于修复后步数）
+      const healTotal = demoSteps.length + (trace.steps.length - 1 + demoSteps.length);
       const outcome = await runHeal({
         session, handle, tracker, collector, refs,
         tracePath, trace, stepIndex: k,
-        demoSteps: (hasActions ? actions! : [step!]) as unknown as Step[],
+        demoSteps,
         vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
         dryRun: dryRun ?? false,
-        auth: authState
+        auth: authState,
+        demoObserver: new RunWatch({
+          handle, label: `自愈演示 · 第 ${k + 1} 步`, watch: session.watchEnabled,
+          progress, progressPrefix: "演示修正步 ", progressTotal: healTotal
+        }),
+        validationObserverFor: (vHandle) => new RunWatch({
+          handle: vHandle, label: "自愈验证", watch: session.watchEnabled,
+          progress, progressPrefix: "验证门 · 全量重放 ", progressOffset: demoSteps.length, progressTotal: healTotal
+        })
       });
       refTables.set(handle.pageId, refs);
 
@@ -452,6 +491,11 @@ export function createServer(session: BrowserSession): McpServer {
       }
 
       if (outcome.status === "validation-failed") {
+        if (!validationCountsAgainstBudget(outcome.validation)) {
+          return { isError: true, content: [{ type: "text" as const, text:
+            `✋ 验证被用户打断（第 ${k + 1} 步的修复未能完成全量重放），trace 未写回、未计自愈次数，请重试。\n\n` +
+            renderRunRecord(outcome.validation) }] };
+        }
         // 验证失败计入预算；lastRun 保持原始失败记录（步号对应磁盘上的 trace）
         budget.perStep.set(k, (budget.perStep.get(k) ?? 0) + 1);
         budget.total += 1;
@@ -465,6 +509,7 @@ export function createServer(session: BrowserSession): McpServer {
       healBudgets.delete(tracePath);
       if (!outcome.dryRun) lastRunByTrace.set(tracePath, outcome.validation);
       const mode = outcome.dryRun ? "dry-run 验证通过（未写回）" : "已写回";
+      progress.report(healTotal, healTotal, mode);
       return { content: [{ type: "text" as const, text:
         `✅ 自愈成功：第 ${k + 1} 步已由 ${(hasActions ? actions! : [step!]).length} 步修复替换，${mode}。\n\n` +
         renderRunRecord(outcome.validation) }] };
