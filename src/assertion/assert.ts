@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { baselineHash, decodePng, diffPng, encodePng } from "../perception/pngDiff.js";
+import { withOverlayHidden } from "../watch/overlay.js";
 
 export class AssertionFailure extends Error {
   constructor(message: string, public actual: string, public expected: string) {
@@ -58,9 +59,12 @@ async function runScreenshotMatch(
     clip = { x: model.content[0], y: model.content[1], width: model.width, height: model.height, scale: 1 };
   }
 
-  const { data } = (await handle.cdp.send("Page.captureScreenshot", {
-    format: "png", ...(clip ? { clip } : {})
-  })) as { data: string };
+  // 观察模式标注不能进基线/比对图：截图期间临时隐藏
+  const { data } = await withOverlayHidden(handle, async () =>
+    (await handle.cdp.send("Page.captureScreenshot", {
+      format: "png", ...(clip ? { clip } : {})
+    })) as { data: string }
+  );
   const actualBuf = Buffer.from(data, "base64");
 
   await mkdir(dir, { recursive: true });
