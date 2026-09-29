@@ -169,6 +169,8 @@ node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1�
   滚动只记告警、不中止；待命时可以随意操作（例如手动登录）。
 - **进度推送**：客户端在 `tools/call` 的 `_meta` 带 `progressToken` 时，batch/replay 按步、
   replay_suite 按用例、heal_step 按「演示 → 验证门」推送 `notifications/progress`（与有头无头无关）。
+  Claude Code 的展示情况（据其 changelog 与 issue #86464，未在本项目实测）：前台调用时进度文字显示在工具调用行下方；
+  超过 120s 被转入后台的调用，2026-09 下旬之前的版本会丢弃进度，之后的版本在后台任务里显示最新进度。
 
 标注画在 `<html>` 下的封闭 Shadow DOM 里，不进快照、不拖隐式等待、不挡点击、截图时自动隐藏，
 生成的描述符与无标注时相同（均有集成测试覆盖）。headless 下不启用，CI 行为不变。
