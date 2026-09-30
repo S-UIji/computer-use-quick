@@ -1,6 +1,6 @@
 import type { PageHandle } from "../session/browser.js";
 import type { WaitCondition } from "../types.js";
-import { resolveTarget } from "../locator/resolve.js";
+import { resolveTarget, LocatorError } from "../locator/resolve.js";
 import type { NetworkTracker } from "./stability.js";
 
 async function isVisible(handle: PageHandle, backendNodeId: number): Promise<boolean> {
@@ -33,19 +33,31 @@ export async function waitFor(
   // response 的精确语义锚点：等待开始后才完成的匹配响应才算数，历史请求不计入
   const since = Date.now();
 
+  const last: { message?: string; ambiguity?: LocatorError } = {};
+
   const satisfied = async (): Promise<boolean> => {
     switch (cond.type) {
-      case "visible": {
-        try {
-          const r = await resolveTarget(handle, cond.target, refs);
-          return await isVisible(handle, r.backendNodeId);
-        } catch { return false; }
-      }
+      case "visible":
       case "hidden": {
         try {
           const r = await resolveTarget(handle, cond.target, refs);
-          return !(await isVisible(handle, r.backendNodeId));
-        } catch { return true; }
+          const visible = await isVisible(handle, r.backendNodeId);
+          last.ambiguity = undefined;
+          last.message = visible ? "找到目标且可见" : "找到目标但不可见";
+          return cond.type === "visible" ? visible : !visible;
+        } catch (err) {
+          if (!(err instanceof LocatorError)) throw err;
+          if (err.kind === "ambiguous") {
+            last.ambiguity = err;
+            last.message = err.matchCount === undefined
+              ? "定位有歧义"
+              : `匹配到 ${err.matchCount} 个，有歧义`;
+            return false;
+          }
+          last.ambiguity = undefined;
+          last.message = `未找到目标（${err.message}）`;
+          return cond.type === "hidden";
+        }
       }
       case "url-contains":
         return (await currentUrl(handle)).includes(cond.value);
@@ -59,7 +71,14 @@ export async function waitFor(
   for (;;) {
     if (await satisfied()) return;
     if (Date.now() >= deadline) {
-      throw new Error(`等待条件 ${cond.type} 超时（${timeoutMs}ms）`);
+      const message = `等待条件 ${cond.type} 超时（${timeoutMs}ms）` +
+        (last.message ? `：最后一次定位${last.message}` : "");
+      if (last.ambiguity) {
+        throw new LocatorError(
+          message, "ambiguous", last.ambiguity.candidates, last.ambiguity.matchCount
+        );
+      }
+      throw new Error(message);
     }
     await new Promise((r) => setTimeout(r, 100));
   }

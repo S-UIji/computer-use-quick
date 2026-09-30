@@ -7,11 +7,17 @@ export class LocatorError extends Error {
   constructor(
     message: string,
     public kind: "target-not-found" | "ambiguous",
-    public candidates: string[] = []
+    public candidates: string[] = [],
+    public matchCount?: number
   ) {
     super(message);
     this.name = "LocatorError";
   }
+}
+
+interface StrategyMatch {
+  id: number | null;
+  count: number;
 }
 
 async function backendIdOfNodeId(handle: PageHandle, nodeId: number): Promise<number> {
@@ -21,7 +27,7 @@ async function backendIdOfNodeId(handle: PageHandle, nodeId: number): Promise<nu
   return node.backendNodeId;
 }
 
-/** 用 CSS 选择器在 scope 内找唯一元素；找不到或非唯一返回 null */
+/** 用 CSS 选择器在 scope 内找唯一元素；找不到或非唯一由 count 表示 */
 /** 元素是否真的"能点"：有布局盒且宽高大于 0。命中不可见节点时不能当作解析成功。 */
 export async function isActionable(handle: PageHandle, backendNodeId: number): Promise<boolean> {
   try {
@@ -38,13 +44,15 @@ async function bySelector(
   handle: PageHandle,
   scope: number,
   selector: string
-): Promise<number | null> {
+): Promise<StrategyMatch> {
   const { nodeIds } = (await handle.cdp.send("DOM.querySelectorAll", {
     nodeId: scope,
     selector
   })) as { nodeIds: number[] };
-  if (nodeIds.length !== 1) return null;
-  return backendIdOfNodeId(handle, nodeIds[0]);
+  return {
+    id: nodeIds.length === 1 ? await backendIdOfNodeId(handle, nodeIds[0]) : null,
+    count: nodeIds.length
+  };
 }
 
 /** 在指定子树内按 role + accessibleName 查询，返回唯一命中的 backendNodeId */
@@ -53,14 +61,17 @@ async function byAx(
   scopeNodeId: number,
   role: string,
   name: string
-): Promise<number | null> {
+): Promise<StrategyMatch> {
   const { nodes } = (await handle.cdp.send("Accessibility.queryAXTree", {
     nodeId: scopeNodeId,
     accessibleName: name,
     role
   })) as { nodes: Array<{ backendDOMNodeId?: number; ignored?: boolean }> };
   const hits = nodes.filter((n) => !n.ignored && n.backendDOMNodeId !== undefined);
-  return hits.length === 1 ? hits[0].backendDOMNodeId! : null;
+  return {
+    id: hits.length === 1 ? hits[0].backendDOMNodeId! : null,
+    count: hits.length
+  };
 }
 
 /**
@@ -73,9 +84,10 @@ async function byAnchor(
   anchorText: string,
   role: string,
   name: string
-): Promise<number | null> {
+): Promise<StrategyMatch> {
   // 打标在目标文档内执行（iframe 子文档走同一路径），查询用 scope 的 nodeId  pierce 进对应文档
   const levels = await markAncestors(handle, scope, anchorText);
+  let ambiguousCount = 0;
   try {
     for (let i = 0; i < levels; i++) {
       const { nodeIds } = (await handle.cdp.send("DOM.querySelectorAll", {
@@ -84,9 +96,10 @@ async function byAnchor(
       })) as { nodeIds: number[] };
       if (nodeIds.length !== 1) continue;
       const hit = await byAx(handle, nodeIds[0], role, name);
-      if (hit !== null) return hit;
+      if (hit.id !== null) return hit;
+      ambiguousCount = Math.max(ambiguousCount, hit.count);
     }
-    return null;
+    return { id: null, count: ambiguousCount };
   } finally {
     await clearMarks(handle, scope);
   }
@@ -102,7 +115,7 @@ async function byText(
   scope: number,
   tag: string,
   text: string
-): Promise<number | null> {
+): Promise<StrategyMatch> {
   const fn = `function (tag, text) {
     var doc = this;
     doc.querySelectorAll("[data-cuq-text]").forEach(function (e) {
@@ -111,13 +124,12 @@ async function byText(
     var els = Array.prototype.slice.call(doc.querySelectorAll(tag)).filter(function (e) {
       return (e.textContent || "").trim() === text;
     });
-    if (els.length !== 1) return 0;
-    els[0].setAttribute("data-cuq-text", "1");
-    return 1;
+    if (els.length === 1) els[0].setAttribute("data-cuq-text", "1");
+    return els.length;
   }`;
 
-  const marked = await callOnDocument<number>(handle, scope, fn, [{ value: tag }, { value: text }]);
-  if (marked !== 1) return null;
+  const count = (await callOnDocument<number>(handle, scope, fn, [{ value: tag }, { value: text }])) ?? 0;
+  if (count !== 1) return { id: null, count };
 
   try {
     return await bySelector(handle, scope, "[data-cuq-text]");
@@ -129,7 +141,7 @@ async function byText(
   }
 }
 
-async function byXPath(handle: PageHandle, xpath: string): Promise<number | null> {
+async function byXPath(handle: PageHandle, xpath: string): Promise<StrategyMatch> {
   // performSearch 需要文档已完整加载到 DOM 域
   await handle.cdp.send("DOM.getDocument", { depth: -1 });
   const { searchId, resultCount } = (await handle.cdp.send("DOM.performSearch", {
@@ -137,13 +149,16 @@ async function byXPath(handle: PageHandle, xpath: string): Promise<number | null
   })) as { searchId: string; resultCount: number };
 
   try {
-    if (resultCount !== 1) return null;
+    if (resultCount !== 1) return { id: null, count: resultCount };
     const { nodeIds } = (await handle.cdp.send("DOM.getSearchResults", {
       searchId,
       fromIndex: 0,
       toIndex: 1
     })) as { nodeIds: number[] };
-    return nodeIds.length === 1 ? backendIdOfNodeId(handle, nodeIds[0]) : null;
+    return {
+      id: nodeIds.length === 1 ? await backendIdOfNodeId(handle, nodeIds[0]) : null,
+      count: nodeIds.length
+    };
   } finally {
     await handle.cdp.send("DOM.discardSearchResults", { searchId }).catch(() => {});
   }
@@ -153,7 +168,7 @@ async function tryStrategy(
   handle: PageHandle,
   s: Strategy,
   scope: number
-): Promise<number | null> {
+): Promise<StrategyMatch> {
   switch (s.kind) {
     case "test-id":
       return bySelector(
@@ -199,6 +214,8 @@ async function resolveOnce(
   // scope 必须在每次尝试内重取：上一尝试到现在页面可能已经导航，旧 documentNodeId 已失效
   const scope = await scopeNodeId(handle, d.framePath);
   const tried: string[] = [];
+  // 保留本轮各策略的最大匹配数；有歧义仍继续尝试后续策略。
+  let ambiguousCount = 0;
   /** 命中过但不可见/不可点的元素，留到全部策略都落空时报错用 */
   let invisibleHit: number | null = null;
 
@@ -206,7 +223,9 @@ async function resolveOnce(
     const s = d.strategies[i];
     let id: number | null = null;
     try {
-      id = await tryStrategy(handle, s, scope);
+      const match = await tryStrategy(handle, s, scope);
+      id = match.id;
+      ambiguousCount = Math.max(ambiguousCount, match.count);
     } catch {
       id = null;
     }
@@ -226,6 +245,15 @@ async function resolveOnce(
       `命中了元素但它不可见/不可点击（无布局盒），已继续尝试其余策略：${tried.join(" → ")}`,
       "target-not-found",
       d.distinguishers ?? []
+    );
+  }
+
+  if (ambiguousCount > 1) {
+    throw new LocatorError(
+      `全部 ${d.strategies.length} 条策略均未唯一命中：${tried.join(" → ")}；匹配到 ${ambiguousCount} 个，有歧义`,
+      "ambiguous",
+      d.distinguishers ?? [],
+      ambiguousCount
     );
   }
 

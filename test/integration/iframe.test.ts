@@ -154,8 +154,8 @@ describe("iframe 内锚定与文本策略（二期收尾解锁）", () => {
         framePath: ["iframe-wall-inner.html"]
       }}}]
     });
-    // iframe 内该文本出现两次 → 唯一性筛选不通过 → target-not-found（而非命中主文档）
+    // iframe 内该文本出现两次 → 唯一性筛选不通过 → ambiguous（而非命中主文档）
     expect(r.ok).toBe(false);
-    expect(r.failure?.kind).toBe("target-not-found");
+    expect(r.failure?.kind).toBe("ambiguous");
   });
 });

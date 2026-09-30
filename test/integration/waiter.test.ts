@@ -152,6 +152,111 @@ describe("waitFor", () => {
     ).rejects.toThrow(/超时/);
   });
 
+  it("visible：歧义超时时报告匹配数量和 ambiguous", async () => {
+    const h = await open("table-dup.html");
+    await expect(
+      waitFor(h, tracker, {
+        type: "visible",
+        target: {
+          descriptor: {
+            strategies: [{ kind: "role-name", role: "button", name: "删除" }],
+            distinguishers: ["ORD20260911", "ORD20260912"],
+            framePath: []
+          }
+        }
+      }, new Map(), 500)
+    ).rejects.toMatchObject({
+      kind: "ambiguous",
+      matchCount: 3,
+      candidates: ["ORD20260911", "ORD20260912"],
+      message: expect.stringMatching(/等待条件 visible 超时.*匹配到 3 个/)
+    });
+  });
+
+  it("hidden：遇到多个匹配不会误判为已隐藏", async () => {
+    const h = await open("hidden-dup.html");
+    await expect(
+      waitFor(h, tracker, {
+        type: "hidden",
+        target: {
+          descriptor: {
+            strategies: [{ kind: "css", value: "button" }],
+            framePath: []
+          }
+        }
+      }, new Map(), 500)
+    ).rejects.toMatchObject({
+      kind: "ambiguous",
+      matchCount: 2,
+      message: expect.stringMatching(/等待条件 hidden 超时.*匹配到 2 个/)
+    });
+  });
+
+  it("visible：唯一目标不可见时超时说明最后状态", async () => {
+    const h = await open("hidden-dup.html");
+    await expect(
+      waitFor(h, tracker, {
+        type: "visible",
+        target: {
+          descriptor: {
+            strategies: [{ kind: "css", value: "#ghost" }],
+            framePath: []
+          }
+        }
+      }, new Map(), 500)
+    ).rejects.toThrow(/找到目标但不可见/);
+  });
+  it.each(["#ghost", "#missing"])("hidden：唯一隐藏或不存在的 %s 满足等待", async (selector) => {
+    const h = await open("hidden-dup.html");
+    await waitFor(h, tracker, {
+      type: "hidden",
+      target: { descriptor: { strategies: [{ kind: "css", value: selector }], framePath: [] } }
+    }, new Map(), 500);
+  });
+
+  it("visible：未找到目标时超时保留原因", async () => {
+    const h = await open("form.html");
+    await expect(waitFor(h, tracker, {
+      type: "visible",
+      target: { descriptor: { strategies: [{ kind: "css", value: "#missing" }], framePath: [] } }
+    }, new Map(), 200)).rejects.toThrow(/等待条件 visible 超时.*未找到目标/);
+  });
+
+  it("hidden：唯一可见目标超时说明仍可见", async () => {
+    const h = await open("hidden-dup.html");
+    await expect(waitFor(h, tracker, {
+      type: "hidden",
+      target: { descriptor: { strategies: [{ kind: "css", value: "#real" }], framePath: [] } }
+    }, new Map(), 200)).rejects.toThrow(/等待条件 hidden 超时.*找到目标且可见/);
+  });
+
+  it("visible：暂时歧义后唯一可见时继续等待并成功", async () => {
+    const h = await open("hidden-dup.html");
+    const waiting = waitFor(h, tracker, {
+      type: "visible",
+      target: { descriptor: { strategies: [{ kind: "css", value: "button" }], framePath: [] } }
+    }, new Map(), 2000);
+    await h.cdp.send("Runtime.evaluate", {
+      expression: 'setTimeout(() => document.getElementById("ghost").remove(), 250)'
+    });
+    await waiting;
+  });
+
+  it("visible：歧义消失后按最后不可见状态超时，不残留歧义类型", async () => {
+    const h = await open("hidden-dup.html");
+    const result = waitFor(h, tracker, {
+      type: "visible",
+      target: { descriptor: { strategies: [{ kind: "css", value: "button" }], framePath: [] } }
+    }, new Map(), 800).then(() => undefined, (error: unknown) => error);
+    await h.cdp.send("Runtime.evaluate", {
+      expression: 'setTimeout(() => document.getElementById("real").remove(), 250)'
+    });
+    const error = await result;
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toHaveProperty("kind");
+    expect((error as Error).message).toMatch(/找到目标但不可见/);
+  });
+
   it("response：目标接口返回即通过（不等网络静默）", async () => {
     const h = await open("async-list.html");
     const p = waitFor(h, tracker, { type: "response", urlPattern: "api/orders" }, new Map(), 5000);

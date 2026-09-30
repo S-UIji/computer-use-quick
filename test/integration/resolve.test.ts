@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, inject } from "vitest";
 import { BrowserSession, type PageHandle } from "../../src/session/browser.js";
 import { takeSnapshot } from "../../src/perception/snapshot.js";
 import { buildDescriptor } from "../../src/locator/descriptor.js";
+import type { Strategy } from "../../src/types.js";
 import { resolve } from "../../src/locator/resolve.js";
 
 let session: BrowserSession;
@@ -77,6 +78,28 @@ describe("resolve", () => {
     };
     const r = await resolve(h, d);
     expect(r.strategyIndex).toBe(1);
+  });
+
+  it.each<Strategy>([
+    { kind: "role-name", role: "button", name: "删除" },
+    { kind: "css", value: "tbody button" },
+    { kind: "text", tag: "button", text: "删除" },
+    { kind: "xpath", value: "//button" },
+    { kind: "container-role-name", containerText: "订单管理", role: "button", name: "删除" }
+  ])("$kind：所有策略未唯一命中时保留歧义数量和消歧信息", async (strategy) => {
+    const h = await open("table-dup.html");
+    await expect(
+      resolve(h, {
+        strategies: [strategy, { kind: "css", value: "#missing" }],
+        framePath: [],
+        distinguishers: ["ORD20260911", "ORD20260912"]
+      })
+    ).rejects.toMatchObject({
+      kind: "ambiguous",
+      matchCount: 3,
+      candidates: ["ORD20260911", "ORD20260912"],
+      message: expect.stringContaining("匹配到 3 个")
+    });
   });
 
   it("text 策略能按可见文本唯一命中", async () => {
