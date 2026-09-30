@@ -82,11 +82,16 @@ export function stepOverflowWarning(count: number): string | undefined {
 }
 
 /**
- * 取页时处理掉的「两次调用之间弹出的窗」（getPage 负责处理，这里只负责报告），
- * 拼成告警前缀放在本次返回的最前面；没有则为空串
+ * 本次返回的告警前缀：会话告知（重连、自动拉起）+ 取页时处理掉的「两次调用之间弹出的窗」。
+ * 处理分别在 BrowserSession / getPage 里完成，这里只负责报告；没有则为空串
  */
-function dialogNotice(handle: PageHandle): string {
-  const lines = (DialogGuard.for(handle)?.takeHandled() ?? []).map((d) => `⚠ ${describeDialog(d)}`);
+function notices(session: BrowserSession, handle?: PageHandle): string {
+  const lines: string[] = [];
+  const n = session.takeNotice();
+  if (n) lines.push(`⚠ ${n}`);
+  if (handle) {
+    for (const d of DialogGuard.for(handle)?.takeHandled() ?? []) lines.push(`⚠ ${describeDialog(d)}`);
+  }
   return lines.length ? lines.join("\n") + "\n\n" : "";
 }
 
@@ -109,7 +114,7 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async ({ pageId, expand, threshold, diff }) => {
       const handle = await session.getPage(pageId);
-      const notice = dialogNotice(handle);
+      const notice = notices(session, handle);
       // 尽早挂上采集器，否则第一次失败时拿不到之前的 console 报错
       await DiagnosticsCollector.attach(handle);
       const snap = await takeSnapshot(handle, { expand, threshold });
@@ -176,7 +181,7 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async ({ pageId, steps, vars, stability, resolveRetryMs }, extra) => {
       const handle = await session.getPage(pageId);
-      const notice = dialogNotice(handle);
+      const notice = notices(session, handle);
       const collector = await DiagnosticsCollector.attach(handle);
       const tracker = await NetworkTracker.attach(handle);
       const refs = refTables.get(handle.pageId) ?? new Map<string, number>();
@@ -233,11 +238,12 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async () => {
       const pages = await session.listPages();
+      const notice = notices(session);
       const current = session.currentPageId() ?? pages[0]?.pageId;
       const lines = pages.map((p) =>
         `${p.pageId === current ? "*" : " "} ${p.pageId}\n    ${p.title || "(无标题)"}\n    ${p.url}`
       );
-      return { content: [{ type: "text" as const, text:
+      return { content: [{ type: "text" as const, text: notice +
         `# 标签页（${pages.length}）\n\n${lines.join("\n") || "（没有可用页面）"}` }] };
     }
   );
@@ -256,7 +262,7 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async ({ pageId, count }) => {
       const handle = await session.getPage(pageId);
-      const notice = dialogNotice(handle);
+      const notice = notices(session, handle);
       const n = discardSteps(handle.pageId, count);
       const left = sessionSteps.get(handle.pageId)?.length ?? 0;
       return { content: [{ type: "text" as const,
@@ -280,7 +286,7 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async ({ name, baseUrl, dir, pageId }) => {
       const handle = await session.getPage(pageId);
-      const notice = dialogNotice(handle);
+      const notice = notices(session, handle);
       const steps = sessionSteps.get(handle.pageId) ?? [];
       if (steps.length === 0) {
         return { content: [{ type: "text" as const,
@@ -318,7 +324,7 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async ({ tracePath, vars, slowMoMs, resolveRetryMs, pageId, auth, updateBaselines }, extra) => {
       const handle = await session.getPage(pageId);
-      const notice = dialogNotice(handle);
+      const notice = notices(session, handle);
       const collector = await DiagnosticsCollector.attach(handle);
       const tracker = await NetworkTracker.attach(handle);
       collector.clear();
@@ -409,7 +415,7 @@ export function createServer(session: BrowserSession): McpServer {
         if (t.record) lastRunByTrace.set(t.path, t.record);
         if (t.ok) healBudgets.delete(t.path);
       }
-      return { content: [{ type: "text" as const, text: renderSuiteResult(result) }] };
+      return { content: [{ type: "text" as const, text: notices(session) + renderSuiteResult(result) }] };
     }
   );
 
@@ -471,7 +477,7 @@ export function createServer(session: BrowserSession): McpServer {
       }
 
       const handle = await session.getPage(pageId);
-      const notice = dialogNotice(handle);
+      const notice = notices(session, handle);
       const collector = await DiagnosticsCollector.attach(handle);
       const tracker = await NetworkTracker.attach(handle);
       const refs = refTables.get(handle.pageId) ?? new Map<string, number>();
@@ -548,7 +554,7 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async ({ path, pageId }) => {
       const handle = await session.getPage(pageId);
-      const notice = dialogNotice(handle);
+      const notice = notices(session, handle);
       const auth = await captureAuth(handle);
       const p = path ?? "./.cuq/auth.json";
       await mkdir(dirname(p), { recursive: true });
@@ -574,7 +580,7 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async ({ pageId, withScreenshot = true }) => {
       const handle = await session.getPage(pageId);
-      const notice = dialogNotice(handle);
+      const notice = notices(session, handle);
       const c = await DiagnosticsCollector.attach(handle);
       const parts: Array<
         { type: "text"; text: string } | { type: "image"; data: string; mimeType: string }

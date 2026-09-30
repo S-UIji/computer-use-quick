@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { BrowserSession } from "./session/browser.js";
+import { parseLaunchSetting } from "./session/launcher.js";
 import { createServer } from "./server.js";
 
 const browserURL = process.env.CUQ_BROWSER_URL ?? "http://127.0.0.1:9222";
+const launch = parseLaunchSetting(process.env.CUQ_LAUNCH);
+if (launch.warning) console.error(`[computer-use-quick] ${launch.warning}`);
 
-const session = await BrowserSession.connect(browserURL);
+// 启动时不连浏览器：先完成 MCP 握手，第一次工具调用再连；连不上返回启动指引，断开后下次调用自动重连
+const session = BrowserSession.lazy(browserURL, { launch: launch.setting === "auto" ? {} : undefined });
 const server = createServer(session);
 await server.connect(new StdioServerTransport());
 

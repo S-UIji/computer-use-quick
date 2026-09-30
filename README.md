@@ -27,6 +27,14 @@ npm run build
 目录固定不变，手动登录一次后登录态就留在里面；它是全新 profile，不含日常书签与登录态。
 浏览器打开 `http://127.0.0.1:9222/json/version` 能看到 JSON 即就绪。
 
+服务端启动时不连浏览器，先起服务端、后开 Chrome 也可以：第一次工具调用时才去连，连不上会返回
+当前平台完整的启动命令，照做后直接重试即可。浏览器中途被关掉，重新打开后下一次调用会自动重连，
+不需要重启 MCP 服务端（重连后的第一次返回会提示之前的标签页和 ref 已失效）。
+
+不想手动启动的话，在 MCP 配置的 `env` 里加 `"CUQ_LAUNCH": "auto"`：连不上且地址是本机时，
+服务端用上面同一个 profile 目录自己拉起有头 Chrome；服务端退出时不关它，下次直接复用。
+Chrome 不在常见位置（或想用 Edge）时，用 `CUQ_CHROME_PATH` 指定可执行文件路径。
+
 ## 接入 Claude Code
 
 在 `.mcp.json` 或 `~/.claude.json` 里加：
@@ -211,7 +219,7 @@ SIGTERM、Ctrl+C）或调用 `BrowserSession.close()` 时会先撤掉所有标�
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（49 个文件 / 360 个测试）
+npm test                  # 先 tsc 构建再跑全部（52 个文件 / 388 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```

@@ -2,6 +2,10 @@ import puppeteer, { type Browser, type Page, type CDPSession } from "puppeteer-c
 import { parseWatchSetting, resolveWatchEnabled } from "../watch/mode.js";
 import { removeAllOverlays } from "../watch/overlay.js";
 import { DialogGuard } from "./dialogs.js";
+import {
+  BrowserUnavailableError, connectNotice, defaultProfileDir, describeConnectError, findChrome,
+  isLocalBrowserUrl, launchChrome, renderGuidance, type LaunchOptions
+} from "./launcher.js";
 
 export interface PageHandle {
   pageId: string;
@@ -34,19 +38,103 @@ async function detectWatch(browser: Browser): Promise<boolean> {
   }
 }
 
+export interface SessionOptions {
+  /** 观察模式显式开关；省略则每次连接时按 CUQ_WATCH 与浏览器 UA 判定 */
+  watch?: boolean;
+  /** 连不上时自动拉起本机 Chrome 的选项；省略则不拉起，只返回启动指引 */
+  launch?: LaunchOptions;
+}
+
 export class BrowserSession {
   private handles = new Map<string, PageHandle>();
   private selected?: string;
   private browserCdp?: CDPSession;
+  private browser?: Browser;
+  /** 并发调用共享同一次连接 */
+  private connecting?: Promise<Browser>;
+  private watch = false;
+  private everConnected = false;
+  private notice?: string;
+  /** 本会话自动拉起的 Chrome 进程号（诊断与测试用；服务端退出不关它） */
+  launchedPid?: number;
 
-  /** watchEnabled：观察模式（页面标注 + 介入检测）是否启用，连接时判定一次 */
-  private constructor(private browser: Browser, readonly watchEnabled: boolean) {}
+  private constructor(private readonly browserURL: string, private readonly opts: SessionOptions) {}
 
-  static async connect(browserURL: string, opts: { watch?: boolean } = {}): Promise<BrowserSession> {
-    const browser = await puppeteer.connect({ browserURL, defaultViewport: null });
-    const session = new BrowserSession(browser, opts.watch ?? await detectWatch(browser));
-    await session.watchTargets();
+  /** 不立即连接：第一次需要浏览器时再连，断开后下一次调用自动重连 */
+  static lazy(browserURL: string, opts: SessionOptions = {}): BrowserSession {
+    return new BrowserSession(browserURL, opts);
+  }
+
+  /** lazy + 立即连接一次（连不上抛 BrowserUnavailableError） */
+  static async connect(browserURL: string, opts: SessionOptions = {}): Promise<BrowserSession> {
+    const session = new BrowserSession(browserURL, opts);
+    await session.ensureConnected();
     return session;
+  }
+
+  /** 观察模式（页面标注 + 介入检测）是否启用，每次（重）连接时判定 */
+  get watchEnabled(): boolean {
+    return this.watch;
+  }
+
+  /** 取出一次性告知（重连、自动拉起），由工具返回放在最前面 */
+  takeNotice(): string | undefined {
+    const n = this.notice;
+    this.notice = undefined;
+    return n;
+  }
+
+  private ensureConnected(): Promise<Browser> {
+    if (this.browser?.connected) return Promise.resolve(this.browser);
+    this.connecting ??= this.establish().finally(() => { this.connecting = undefined; });
+    return this.connecting;
+  }
+
+  private async establish(): Promise<Browser> {
+    let browser: Browser;
+    let launchedProfile: string | undefined;
+    try {
+      browser = await puppeteer.connect({ browserURL: this.browserURL, defaultViewport: null });
+    } catch (err) {
+      const reason = describeConnectError(err);
+      const launch = this.opts.launch;
+      if (!launch || !isLocalBrowserUrl(this.browserURL)) throw this.unavailable(reason);
+      try {
+        const r = await launchChrome(this.browserURL, launch);
+        this.launchedPid = r.pid;
+        browser = await puppeteer.connect({ browserURL: this.browserURL, defaultViewport: null });
+        launchedProfile = r.profileDir;
+      } catch (launchErr) {
+        throw this.unavailable(reason, launchErr instanceof Error ? launchErr.message : String(launchErr));
+      }
+    }
+    this.resetBrowserState();
+    this.browser = browser;
+    browser.once("disconnected", () => {
+      // 旧连接的迟到事件不能清掉新连接的状态
+      if (this.browser !== browser) return;
+      this.browser = undefined;
+      this.resetBrowserState();
+    });
+    this.watch = this.opts.watch ?? await detectWatch(browser);
+    await this.watchTargets(browser);
+    this.notice = connectNotice(this.everConnected, launchedProfile);
+    this.everConnected = true;
+    return browser;
+  }
+
+  private resetBrowserState(): void {
+    this.handles.clear();
+    this.selected = undefined;
+    this.browserCdp = undefined;
+  }
+
+  private unavailable(reason: string, launchError?: string): BrowserUnavailableError {
+    return new BrowserUnavailableError(renderGuidance({
+      browserURL: this.browserURL, reason, launchError,
+      chromePath: this.opts.launch?.chromePath ?? findChrome(),
+      profileDir: this.opts.launch?.profileDir ?? defaultProfileDir()
+    }));
   }
 
   /**
@@ -54,8 +142,8 @@ export class BrowserSession {
    * 句柄条目与 CDP 会话引用在这里自动清掉。页面级会话收不到别的 target 的事件，
    * 必须在浏览器级会话上开 discover。
    */
-  private async watchTargets(): Promise<void> {
-    const browserCdp = await this.browser.target().createCDPSession();
+  private async watchTargets(browser: Browser): Promise<void> {
+    const browserCdp = await browser.target().createCDPSession();
     this.browserCdp = browserCdp;
     await browserCdp.send("Target.setDiscoverTargets", { discover: true });
     browserCdp.on("Target.targetDestroyed", (e: { targetId: string }) => {
@@ -78,13 +166,14 @@ export class BrowserSession {
   }
 
   async listPages(): Promise<Array<{ pageId: string; title: string; url: string }>> {
+    const browser = await this.ensureConnected();
     const out: Array<{ pageId: string; title: string; url: string }> = [];
     // 标题取浏览器级 target 信息，不进页面求值：任何一个标签页开着 JS 弹窗，page.title() 都会挂住
     const infos = (await this.browserCdp?.send("Target.getTargets")) as
       { targetInfos: Array<{ targetId: string; title: string }> } | undefined;
     const titles = new Map(infos?.targetInfos.map((t) => [t.targetId, t.title]) ?? []);
     // 并行回放期间页面分散在多个 BrowserContext 里，要全部列出
-    for (const context of this.browser.browserContexts()) {
+    for (const context of browser.browserContexts()) {
       for (const page of await context.pages()) {
         const id = targetIdOf(page);
         out.push({ pageId: id, title: titles.get(id) ?? "", url: page.url() });
@@ -120,8 +209,9 @@ export class BrowserSession {
   }
 
   async getPage(pageId?: string): Promise<PageHandle> {
+    const browser = await this.ensureConnected();
     const id = pageId ?? this.selected;
-    const pages = await this.browser.pages();
+    const pages = await browser.pages();
 
     let page: Page | undefined;
     if (id) page = pages.find((p) => targetIdOf(p) === id);
@@ -137,7 +227,7 @@ export class BrowserSession {
 
   /** 开一个新标签页并建立 handle。不改变当前选中页。 */
   async newPage(): Promise<PageHandle> {
-    return this.setupHandle(await this.browser.newPage());
+    return this.setupHandle(await (await this.ensureConnected()).newPage());
   }
 
   /**
@@ -146,7 +236,7 @@ export class BrowserSession {
    * release 即销毁整个 Context（连带页面），可重复调用。
    */
   async newIsolatedPage(): Promise<{ handle: PageHandle; release: () => Promise<void> }> {
-    const context = await this.browser.createBrowserContext();
+    const context = await (await this.ensureConnected()).createBrowserContext();
     const handle = await this.setupHandle(await context.newPage());
     let released = false;
     const release = async (): Promise<void> => {
@@ -178,6 +268,9 @@ export class BrowserSession {
     }
     this.handles.clear();
     await this.browserCdp?.detach().catch(() => {});
-    this.browser.disconnect();
+    // 从未连上时什么都不做；先置空，断开事件到达时不会再清一遍
+    const browser = this.browser;
+    this.browser = undefined;
+    browser?.disconnect();
   }
 }
