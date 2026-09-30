@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, inject } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrowserSession } from "../../src/session/browser.js";
@@ -139,5 +139,56 @@ describe("descriptor 固化", () => {
     });
     const loaded = await loadTrace(path);
     expect(JSON.stringify(loaded.steps)).not.toContain('"ref"');
+  });
+});
+
+describe("凭证不落盘", () => {
+  const refOf = (text: string, line: string) =>
+    text.split("\n").find((l) => l.includes(line))!.match(/\[(e\d+)\]/)![1];
+
+  it("用 ${VAR} 填写时，固化步骤保留占位符，落盘文件不含真实值", async () => {
+    const handle = await session.getPage();
+    await handle.page.goto(`${fx.url}/form.html`, { waitUntil: "load" });
+    const snap = await takeSnapshot(handle);
+
+    const r = await runBatch({
+      handle, tracker, collector, refs: snap.refs, vars: { APP_PASS: "s3cret" },
+      steps: [{ action: "fill", target: { ref: refOf(snap.text, 'textbox "密码"') }, value: "${APP_PASS}" }]
+    });
+
+    expect(r.ok).toBe(true);
+    expect((r.capturedSteps[0] as { value: string }).value).toBe("${APP_PASS}");
+    const path = await saveTrace(dir, {
+      name: "placeholder-kept", baseUrl: fx.url,
+      createdAt: new Date().toISOString(), steps: r.capturedSteps
+    });
+    expect(await readFile(path, "utf8")).not.toContain("s3cret");
+  });
+
+  it("只有 type=password 的输入框写明文会告警并打 sensitive 标记，save_trace 拒存", async () => {
+    const handle = await session.getPage();
+    await handle.page.goto(`${fx.url}/secret-field.html`, { waitUntil: "load" });
+    const snap = await takeSnapshot(handle);
+
+    const r = await runBatch({
+      handle, tracker, collector, refs: snap.refs, vars: {},
+      steps: [
+        { action: "fill", target: { ref: refOf(snap.text, 'textbox "昵称"') }, value: "小王" },
+        // 走 descriptor 而非 ref：识别不能只挂在 ref 固化那条路径上
+        { action: "fill", target: { descriptor: { strategies: [
+          { kind: "role-name", role: "textbox", name: "访问码" }
+        ], framePath: [] } }, value: "s3cret" }
+      ]
+    });
+
+    expect(r.ok).toBe(true);
+    expect(r.results[0].error).toBeUndefined();
+    expect((r.capturedSteps[0] as { sensitive?: boolean }).sensitive).toBeUndefined();
+    expect(r.results[1].error).toMatch(/明文/);
+    expect((r.capturedSteps[1] as { sensitive?: boolean }).sensitive).toBe(true);
+    await expect(saveTrace(dir, {
+      name: "plaintext-rejected", baseUrl: fx.url,
+      createdAt: new Date().toISOString(), steps: r.capturedSteps
+    })).rejects.toThrow(/明文/);
   });
 });

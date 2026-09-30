@@ -2,11 +2,21 @@ import { writeFile, readFile, mkdir, appendFile, rename } from "node:fs/promises
 import { join } from "node:path";
 import type { Trace, Step, HealSidecarRecord } from "../types.js";
 
-const SECRET_HINT = /(password|passwd|pwd|secret|token|credential|apikey|api_key)/i;
+/** 定位信息里出现这些字样即视为凭证字段。中文词不能少：中文系统的密码框标签就是「密码」 */
+const SECRET_HINT = /(password|passwd|pwd|secret|token|credential|apikey|api_key|密码|口令|密钥|秘钥|令牌)/i;
+
+const PLACEHOLDER = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 
 function targetText(step: Step): string {
   const t = (step as { target?: unknown }).target;
   return t ? JSON.stringify(t) : "";
+}
+
+/** fill 是否把明文写进了凭证字段：带 sensitive 标记（type=password）或定位信息含凭证字样，且值不是 ${VAR} */
+export function isPlaintextSecret(step: Step): boolean {
+  if (step.action !== "fill") return false;
+  const looksSecret = step.sensitive === true || SECRET_HINT.test(targetText(step));
+  return looksSecret && !PLACEHOLDER.test(step.value);
 }
 
 export function assertNoSecrets(trace: Trace): void {
@@ -18,10 +28,7 @@ export function assertNoSecrets(trace: Trace): void {
         `请在保存前把它固化为 descriptor。`
       );
     }
-    if (step.action !== "fill") continue;
-    const looksSecret = SECRET_HINT.test(targetText(step));
-    const isPlaceholder = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/.test(step.value);
-    if (looksSecret && !isPlaceholder) {
+    if (isPlaintextSecret(step)) {
       throw new Error(
         `第 ${i + 1} 步向疑似凭证字段写入了明文值。请改用 \${VAR} 占位符，` +
         `真实值通过 batch/replay 的 vars 或环境变量传入。`

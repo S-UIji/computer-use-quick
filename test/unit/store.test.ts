@@ -63,6 +63,23 @@ describe("assertNoSecrets", () => {
     ]})).toThrow(/明文/);
   });
 
+  it("中文标签的密码框写入明文时抛错", () => {
+    expect(() => assertNoSecrets({ ...base, steps: [
+      { action: "fill", target: { descriptor: { strategies: [
+        { kind: "role-name", role: "textbox", name: "密码" }
+      ], framePath: [] } }, value: "s3cret" }
+    ]})).toThrow(/明文/);
+  });
+
+  it("带 sensitive 标记的步骤：定位信息不含敏感字样也拒绝明文，占位符放行", () => {
+    expect(() => assertNoSecrets({ ...base, steps: [
+      { action: "fill", target: cssTarget("#code"), value: "s3cret", sensitive: true }
+    ]})).toThrow(/明文/);
+    assertNoSecrets({ ...base, steps: [
+      { action: "fill", target: cssTarget("#code"), value: "${APP_PASS}", sensitive: true }
+    ]});
+  });
+
   it("非敏感字段的明文值放行", () => {
     assertNoSecrets({ ...base, steps: [
       { action: "fill", target: cssTarget("#user"), value: "admin" }

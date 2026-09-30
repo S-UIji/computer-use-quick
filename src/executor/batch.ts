@@ -10,6 +10,7 @@ import { interpolateStep } from "./variables.js";
 import { LocatorError } from "../locator/resolve.js";
 import { takeSnapshot } from "../perception/snapshot.js";
 import { buildDescriptor } from "../locator/descriptor.js";
+import { isPlaintextSecret } from "../trace/store.js";
 
 export interface BatchOptions {
   handle: PageHandle;
@@ -61,6 +62,23 @@ function classify(err: unknown): {
   // 其余一律归为"动作执行失败"。以前这里兜底成 target-not-found，
   // 于是"点击其实成功了、只是后续步骤出错"也会被标成找不到元素，排障被带偏。
   return { kind: "action-failed", message };
+}
+
+/** 目标是否为 <input type=password>：凭证字段最可靠的信号，比按标签猜字样准 */
+async function isPasswordInput(handle: PageHandle, backendNodeId: number): Promise<boolean> {
+  try {
+    const { node } = (await handle.cdp.send("DOM.describeNode", { backendNodeId })) as {
+      node: { localName?: string; attributes?: string[] };
+    };
+    if (node.localName !== "input") return false;
+    const attrs = node.attributes ?? [];
+    for (let i = 0; i + 1 < attrs.length; i += 2) {
+      if (attrs[i].toLowerCase() === "type") return attrs[i + 1].toLowerCase() === "password";
+    }
+    return false;
+  } catch {
+    return false; // 读不到属性不影响执行，凭证识别退回到按字样判断
+  }
 }
 
 /** 失败上下文：抓快照（失败不掩盖原始错误）+ console 报错 + 失败请求，一次给全 */
@@ -129,12 +147,17 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
         ? (target as { ref: string }).ref
         : undefined;
 
-      let captured = step;
-      if (opts.captureDescriptors !== false && refName !== undefined) {
+      // 固化基于插值前的原始步骤：${VAR} 占位符必须原样进 trace，真实值只在执行时替换
+      let captured: Step = raw;
+      let passwordField = false;
+      const capturing = opts.captureDescriptors !== false;
+      if (capturing && (refName !== undefined || raw.action === "fill")) {
         ctx.onResolved = async (backendNodeId: number) => {
+          if (raw.action === "fill") passwordField = await isPasswordInput(opts.handle, backendNodeId);
+          if (refName === undefined) return;
           try {
             const descriptor = await buildDescriptor(opts.handle, backendNodeId);
-            captured = { ...step, target: { descriptor } } as Step;
+            captured = { ...raw, target: { descriptor } } as Step;
           } catch (err) {
             // 固化失败只降级成警告：跑得通比能回放重要，
             // 不能因为拿不到 descriptor 就把一个已经成功的动作判成失败。
@@ -162,9 +185,7 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
         );
         ctx.lastWaitTimedOut = undefined;
       }
-      if (
-        opts.captureDescriptors !== false && refName !== undefined && captured === step
-      ) {
+      if (capturing && refName !== undefined && captured === raw) {
         // 带 ref 的步骤没固化成功（固化抛错，或像 assert hidden 一样目标已不存在、
         // 根本没机会固化）。它进 trace 会让 save_trace 整体拒绝且本 session 无法恢复，
         // 所以按告警所说跳过它——跑得通比能回放重要。
@@ -172,6 +193,11 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
           notes.push(`ref「${refName}」未固化成 descriptor：这一步不会进 trace`);
         }
       } else {
+        if (passwordField) captured = { ...captured, sensitive: true } as Step;
+        // 当场告警，别等探索完整条流程、到 save_trace 才被拒
+        if (capturing && isPlaintextSecret(captured)) {
+          notes.push("向凭证字段写入了明文值，保存 trace 时会被拒绝：请改用 ${VAR} 占位符，真实值通过 vars 传入");
+        }
         capturedSteps.push(captured);
       }
 

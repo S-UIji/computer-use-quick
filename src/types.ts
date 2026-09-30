@@ -81,7 +81,8 @@ export interface ResolveResult {
 export type Step =
   | { action: "navigate"; url: string }
   | { action: "click"; target: TargetRef }
-  | { action: "fill"; target: TargetRef; value: string }
+  /** sensitive：固化时发现目标是 type=password 输入框，save_trace 据此拒绝明文值 */
+  | { action: "fill"; target: TargetRef; value: string; sensitive?: boolean }
   | { action: "select"; target: TargetRef; value: string }
   | { action: "press"; key: string }
   | { action: "hover"; target: TargetRef }

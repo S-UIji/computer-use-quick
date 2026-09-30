@@ -66,7 +66,9 @@ npm run build
 写 trace 时给每个意图步配断言（自愈验证门的语义天花板）。
 
 **回归**：`replay` 传 trace 路径。凭证通过 `vars` 或环境变量注入，**绝不写进 trace**——
-写了明文，`save_trace` 会直接拒绝保存。
+写了明文，`save_trace` 会直接拒绝保存。batch 里写 `${VAR}` 占位符，trace 里存的就是占位符，
+真实值只在执行时替换。凭证字段按 `type=password` 与定位信息里的字样（password、密码、口令、令牌等）识别；
+向凭证字段写明文时 batch 当场告警，不必等到 `save_trace` 被拒。
 
 **自愈**：replay 返回 `heal_required` 后，用 `snapshot`/`batch` 在失败页面上找到正确操作，
 调 `heal_step` 演示修正步——服务端捕获描述符、新标签页全量重放验证，全绿才原子写回，
@@ -201,7 +203,7 @@ SIGTERM、Ctrl+C）或调用 `BrowserSession.close()` 时会先撤掉所有标�
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（46 个文件 / 336 个测试）
+npm test                  # 先 tsc 构建再跑全部（47 个文件 / 342 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```
