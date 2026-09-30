@@ -1,6 +1,7 @@
 import puppeteer, { type Browser, type Page, type CDPSession } from "puppeteer-core";
 import { parseWatchSetting, resolveWatchEnabled } from "../watch/mode.js";
 import { removeAllOverlays } from "../watch/overlay.js";
+import { DialogGuard } from "./dialogs.js";
 
 export interface PageHandle {
   pageId: string;
@@ -78,10 +79,15 @@ export class BrowserSession {
 
   async listPages(): Promise<Array<{ pageId: string; title: string; url: string }>> {
     const out: Array<{ pageId: string; title: string; url: string }> = [];
+    // 标题取浏览器级 target 信息，不进页面求值：任何一个标签页开着 JS 弹窗，page.title() 都会挂住
+    const infos = (await this.browserCdp?.send("Target.getTargets")) as
+      { targetInfos: Array<{ targetId: string; title: string }> } | undefined;
+    const titles = new Map(infos?.targetInfos.map((t) => [t.targetId, t.title]) ?? []);
     // 并行回放期间页面分散在多个 BrowserContext 里，要全部列出
     for (const context of this.browser.browserContexts()) {
       for (const page of await context.pages()) {
-        out.push({ pageId: targetIdOf(page), title: await page.title(), url: page.url() });
+        const id = targetIdOf(page);
+        out.push({ pageId: id, title: titles.get(id) ?? "", url: page.url() });
       }
     }
     return out;
@@ -96,16 +102,19 @@ export class BrowserSession {
     this.selected = pageId;
   }
 
-  /** 装配 handle：CDP session + 三个 enable。三处建页路径共用。 */
+  /** 装配 handle：CDP session + 弹窗守卫 + 三个 enable。三处建页路径共用。 */
   private async setupHandle(page: Page): Promise<PageHandle> {
     const key = targetIdOf(page);
     const cached = this.handles.get(key);
     if (cached) return cached;
     const cdp = await page.createCDPSession();
+    const handle: PageHandle = { pageId: key, page, cdp };
+    // 弹窗守卫最先装：页面上若已开着弹窗（如接管用户的标签页），后面的 enable 会被它挂住
+    const guard = await DialogGuard.install(handle);
+    await guard.settlePending();
     await cdp.send("Accessibility.enable");
     await cdp.send("DOM.enable");
     await cdp.send("Runtime.enable");
-    const handle: PageHandle = { pageId: key, page, cdp };
     this.handles.set(key, handle);
     return handle;
   }
@@ -120,6 +129,8 @@ export class BrowserSession {
     if (!page) throw new Error("浏览器中没有可用页面");
 
     const handle = await this.setupHandle(page);
+    // 两次调用之间弹出的窗会挂住本次调用的一切操作：取页即处理，记录留给工具返回报告
+    await DialogGuard.for(handle)?.settlePending();
     this.selected ??= handle.pageId;
     return handle;
   }

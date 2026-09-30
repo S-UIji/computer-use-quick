@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>弹窗</title></head>
+<body>
+  <main>
+    <h1>弹窗</h1>
+    <button id="alert" onclick="alert('提示一下'); out('alert-done')">提示</button>
+    <button id="confirm" onclick="out(confirm('确定删除？') ? 'confirmed' : 'cancelled')">删除</button>
+    <button id="prompt" onclick="out('prompt:' + prompt('请输入名字', '默认名'))">改名</button>
+    <!-- 点击立即返回，弹窗在两次调用之间才打开 -->
+    <button id="timer" onclick="setTimeout(() => alert('定时弹窗'), 1500)">稍后提示</button>
+    <p id="out" role="status"></p>
+  </main>
+  <script>
+    function out(s) { document.getElementById("out").textContent = s; }
+  </script>
+</body></html>

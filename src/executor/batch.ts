@@ -11,6 +11,7 @@ import { LocatorError } from "../locator/resolve.js";
 import { takeSnapshot } from "../perception/snapshot.js";
 import { buildDescriptor } from "../locator/descriptor.js";
 import { isPlaintextSecret } from "../trace/store.js";
+import { DialogGuard, describeDialog } from "../session/dialogs.js";
 
 export interface BatchOptions {
   handle: PageHandle;
@@ -107,6 +108,17 @@ async function failureAt(
 }
 
 export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
+  // 执行期间弹出的 JS 弹窗立即按策略处理，否则页面上的一切 CDP 调用都会挂住
+  const dialogs = DialogGuard.for(opts.handle);
+  dialogs?.arm();
+  try {
+    return await runSteps(opts, dialogs);
+  } finally {
+    dialogs?.disarm();
+  }
+}
+
+async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): Promise<BatchResult> {
   const obs = opts.observer;
   const ctx: ActionContext = {
     handle: opts.handle,
@@ -139,6 +151,7 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
 
     try {
       const step = interpolateStep(raw, ctx.vars);
+      dialogs?.setStep(step);
       // ref 是单次快照内的短期句柄，不能进 trace，要固化成长期 descriptor。
       // 固化的时机必须早于动作本身：动作一旦触发导航或打开新标签，原元素就失效了，
       // 事后再固化必然失败——早先的版本因此把"点击成功且页面已跳转"误判为步骤失败。
@@ -185,6 +198,7 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
         );
         ctx.lastWaitTimedOut = undefined;
       }
+      const handledDialogs = dialogs?.takeHandled() ?? [];
       if (capturing && refName !== undefined && captured === raw) {
         // 带 ref 的步骤没固化成功（固化抛错，或像 assert hidden 一样目标已不存在、
         // 根本没机会固化）。它进 trace 会让 save_trace 整体拒绝且本 session 无法恢复，
@@ -194,12 +208,18 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
         }
       } else {
         if (passwordField) captured = { ...captured, sensitive: true } as Step;
+        // 按默认策略处理过弹窗的步骤记下处理方式，回放据此复现，不随默认策略变化
+        if (capturing && handledDialogs.some((d) => d.source === "default")) {
+          captured = { ...captured, dialog: "accept" } as Step;
+        }
         // 当场告警，别等探索完整条流程、到 save_trace 才被拒
         if (capturing && isPlaintextSecret(captured)) {
           notes.push("向凭证字段写入了明文值，保存 trace 时会被拒绝：请改用 ${VAR} 占位符，真实值通过 vars 传入");
         }
         capturedSteps.push(captured);
       }
+      // 放在固化判断之后：上面「未固化」告警靠 notes 是否为空判断有没有别的说明
+      for (const d of handledDialogs) notes.push(describeDialog(d));
 
       // 介入检测在步骤边界结算：本步期间的用户操作归到本步
       const interruption = obs?.takeInterruption();
@@ -244,9 +264,12 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
       const interruption = obs?.takeInterruption();
       obs?.takeScrollCount(); // 失败即结束，滚动计数一并清掉
       const kind: FailureKind = interruption ? "user-interrupted" : c.kind;
-      const message = interruption
+      const baseMessage = interruption
         ? `本步执行期间检测到用户操作（${describeInterruption(interruption)}）；原始错误：${c.kind}：${c.message}`
         : c.message;
+      // 弹窗被取消常是后续断言失败的原因，失败时同样要显形
+      const dialogNotes = (dialogs?.takeHandled() ?? []).map(describeDialog);
+      const message = dialogNotes.length ? `${baseMessage}（本步期间${dialogNotes.join("；")}）` : baseMessage;
       const result: StepResult = {
         index: i, action: raw.action, ok: false, durationMs: Date.now() - t0, error: message
       };
@@ -261,6 +284,10 @@ export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
   const final = await takeSnapshot(opts.handle);
   opts.refs.clear();
   for (const [k, v] of final.refs) opts.refs.set(k, v);
+  // 最后一步结束到收尾快照之间弹出的窗（如定时 alert）记到最后一步上
+  const late = (dialogs?.takeHandled() ?? []).map(describeDialog);
+  const last = results[results.length - 1];
+  if (late.length && last) last.error = [last.error, ...late].filter(Boolean).join("；");
 
   await obs?.onRunEnd({ ok: true, interrupted: false });
   return { ok: true, results, vars: ctx.vars, snapshot: final.text, capturedSteps, artifacts: ctx.artifacts ?? [] };

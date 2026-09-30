@@ -36,6 +36,11 @@ describe("interpolateStep", () => {
     expect(interpolateStep(s, { USER: "admin" })).toMatchObject({ expected: "欢迎 admin" });
   });
 
+  it("替换 promptText（prompt 可能要求输入口令）", () => {
+    const s: Step = { action: "click", target: { ref: "e1" }, promptText: "${PIN}" };
+    expect(interpolateStep(s, { PIN: "1234" })).toMatchObject({ promptText: "1234" });
+  });
+
   it("不含变量的 step 原样返回", () => {
     const s: Step = { action: "press", key: "Enter" };
     expect(interpolateStep(s, {})).toEqual(s);

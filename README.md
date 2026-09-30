@@ -199,11 +199,19 @@ SIGTERM、Ctrl+C）或调用 `BrowserSession.close()` 时会先撤掉所有标�
 - **click 对被 CSS 隐藏/覆盖的元素自动兜底**：先做 hit-test（`elementFromPoint`），
   若目标元素不在点击坐标（被覆盖 div 替代或 `opacity:0` 隐藏），在 CDP 鼠标事件之后
   补一个 `dispatchEvent(MouseEvent('click'))` 直达目标元素，避免双击副作用。
+- **JS 弹窗（alert/confirm/prompt/离开页面确认）自动处理**：弹窗开着时页面上的一切操作都会挂住，
+  所以执行期间弹出的窗立即处理。
+  - 策略：confirm/prompt 默认确定；步骤里写 `"dialog": "dismiss"` 取消；`"promptText"` 指定
+    prompt 要填的文本（支持 `${VAR}`），省略则用弹窗自带的默认值；alert 与离开页面确认总是放行。
+  - 报告与固化：处理结果写进该步结果；固化时按默认策略处理过弹窗的步骤会记下 `dialog`，回放据此复现。
+  - 两次调用之间弹出的窗（定时器触发，或有头模式下用户自己点出来的）先不动，
+    下一次工具调用开始时按默认策略处理，并写在该次返回的最前面。
+  - 接管前就已开着弹窗的标签页只能盲关，报告里拿不到弹窗内容。
 
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（47 个文件 / 342 个测试）
+npm test                  # 先 tsc 构建再跑全部（49 个文件 / 360 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```

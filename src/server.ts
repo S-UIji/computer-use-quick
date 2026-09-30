@@ -2,7 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { BrowserSession } from "./session/browser.js";
+import type { BrowserSession, PageHandle } from "./session/browser.js";
+import { DialogGuard, describeDialog } from "./session/dialogs.js";
 import type { RunRecord, Step } from "./types.js";
 import { takeSnapshot } from "./perception/snapshot.js";
 import { diffLines, renderDiff } from "./perception/diff.js";
@@ -80,6 +81,15 @@ export function stepOverflowWarning(count: number): string | undefined {
     : undefined;
 }
 
+/**
+ * 取页时处理掉的「两次调用之间弹出的窗」（getPage 负责处理，这里只负责报告），
+ * 拼成告警前缀放在本次返回的最前面；没有则为空串
+ */
+function dialogNotice(handle: PageHandle): string {
+  const lines = (DialogGuard.for(handle)?.takeHandled() ?? []).map((d) => `⚠ ${describeDialog(d)}`);
+  return lines.length ? lines.join("\n") + "\n\n" : "";
+}
+
 export function createServer(session: BrowserSession): McpServer {
   const server = new McpServer({ name: "computer-use-quick", version: "0.1.0" });
 
@@ -99,6 +109,7 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async ({ pageId, expand, threshold, diff }) => {
       const handle = await session.getPage(pageId);
+      const notice = dialogNotice(handle);
       // 尽早挂上采集器，否则第一次失败时拿不到之前的 console 报错
       await DiagnosticsCollector.attach(handle);
       const snap = await takeSnapshot(handle, { expand, threshold });
@@ -109,7 +120,7 @@ export function createServer(session: BrowserSession): McpServer {
       lastSnapshots.set(handle.pageId, snap.text);
 
       if (diff) {
-        return { content: [{ type: "text" as const, text: renderDiff(diffLines(
+        return { content: [{ type: "text" as const, text: notice + renderDiff(diffLines(
           prev === undefined ? null : prev.split("\n"),
           snap.text.split("\n")
         )) }] };
@@ -118,7 +129,7 @@ export function createServer(session: BrowserSession): McpServer {
       return {
         content: [{
           type: "text" as const,
-          text:
+          text: notice +
             `# 页面快照 (${handle.pageId})\n` +
             `节点 ${snap.stats.rawNodes} → ${snap.stats.prunedNodes}，折叠组 ${snap.stats.collapsedGroups}\n\n` +
             snap.text
@@ -137,6 +148,8 @@ export function createServer(session: BrowserSession): McpServer {
         "每个动作后自动做稳定性等待，无需写 sleep（纯 setTimeout 触发的更新除外，那种要用 wait）。\n" +
         "fail-fast：任一步失败即停，并一次性返回失败步、当前快照、console 报错和失败请求。\n" +
         "点击会打开新标签页的链接后，用 list_pages 拿到新标签的 pageId 再做后续操作。\n" +
+        "JS 弹窗自动处理，结果里会写明弹窗内容与处理方式：confirm/prompt 默认确定，" +
+        "要取消就在该步加 \"dialog\":\"dismiss\"，prompt 要填的文本用 \"promptText\"；alert 与离开页面确认总是放行。\n" +
         "target 用 snapshot 返回的 ref（{\"ref\":\"e3\"}）或 descriptor。\n" +
         "提示：快照里被折叠的组，组内元素没有 ref，但【不需要先 expand】——" +
         "直接用 container-role-name 定位即可，containerText 取组内条目的文字、name 取 fields 里的项，" +
@@ -163,6 +176,7 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async ({ pageId, steps, vars, stability, resolveRetryMs }, extra) => {
       const handle = await session.getPage(pageId);
+      const notice = dialogNotice(handle);
       const collector = await DiagnosticsCollector.attach(handle);
       const tracker = await NetworkTracker.attach(handle);
       const refs = refTables.get(handle.pageId) ?? new Map<string, number>();
@@ -186,7 +200,7 @@ export function createServer(session: BrowserSession): McpServer {
         const overflow = stepOverflowWarning(sessionSteps.get(handle.pageId)?.length ?? 0);
         if (overflow) warnings.push(overflow);
         if (watch.setupWarning) warnings.push(watch.setupWarning);
-        return { content: [{ type: "text" as const, text:
+        return { content: [{ type: "text" as const, text: notice +
           `✅ ${r.results.length} 步全部成功（合计 ${total}ms）\n` +
           (warnings.length ? `\n⚠ ${warnings.join("\n⚠ ")}\n` : "") +
           `\n## 执行后快照\n${r.snapshot}` }] };
@@ -197,7 +211,7 @@ export function createServer(session: BrowserSession): McpServer {
         ? `✋ 第 ${f.failedIndex + 1} 步：user-interrupted（被用户打断，不是页面问题）`
         : `❌ 第 ${f.failedIndex + 1} 步失败：${f.kind}`;
       // isError 让客户端在协议层就能看出失败，不必去解析文案
-      return { isError: true, content: [{ type: "text" as const, text:
+      return { isError: true, content: [{ type: "text" as const, text: notice +
         `${head}\n${f.message}\n\n` +
         (watch.setupWarning ? `⚠ ${watch.setupWarning}\n\n` : "") +
         `## 失败步骤\n${JSON.stringify(f.failedStep, null, 2)}\n\n` +
@@ -242,10 +256,11 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async ({ pageId, count }) => {
       const handle = await session.getPage(pageId);
+      const notice = dialogNotice(handle);
       const n = discardSteps(handle.pageId, count);
       const left = sessionSteps.get(handle.pageId)?.length ?? 0;
       return { content: [{ type: "text" as const,
-        text: `已丢弃 ${n} 步，本页还剩 ${left} 步已记录步骤。` }] };
+        text: `${notice}已丢弃 ${n} 步，本页还剩 ${left} 步已记录步骤。` }] };
     }
   );
 
@@ -265,16 +280,17 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async ({ name, baseUrl, dir, pageId }) => {
       const handle = await session.getPage(pageId);
+      const notice = dialogNotice(handle);
       const steps = sessionSteps.get(handle.pageId) ?? [];
       if (steps.length === 0) {
         return { content: [{ type: "text" as const,
-          text: "本 session 尚无成功执行的步骤，无可保存内容。" }] };
+          text: notice + "本 session 尚无成功执行的步骤，无可保存内容。" }] };
       }
       const path = await saveTrace(dir ?? "./traces", {
         name, baseUrl, createdAt: new Date().toISOString(), steps
       });
       const overflow = stepOverflowWarning(steps.length);
-      return { content: [{ type: "text" as const, text:
+      return { content: [{ type: "text" as const, text: notice +
         `已保存 ${steps.length} 步到 ${path}` + (overflow ? `\n${overflow}` : "") }] };
     }
   );
@@ -302,13 +318,14 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async ({ tracePath, vars, slowMoMs, resolveRetryMs, pageId, auth, updateBaselines }, extra) => {
       const handle = await session.getPage(pageId);
+      const notice = dialogNotice(handle);
       const collector = await DiagnosticsCollector.attach(handle);
       const tracker = await NetworkTracker.attach(handle);
       collector.clear();
 
       const { auth: authState, error: authError } = await resolveAuth(auth);
       if (authError) {
-        return { isError: true, content: [{ type: "text" as const, text: authError }] };
+        return { isError: true, content: [{ type: "text" as const, text: notice + authError }] };
       }
       // 认证态注入抢在 replay 的 navigate 之前——localStorage 播种随新文档生效
       if (authState) await applyAuth(handle, authState);
@@ -334,7 +351,7 @@ export function createServer(session: BrowserSession): McpServer {
       await archiveRun({ traceName: trace.name, record: rec, trace, screenshotBase64: screenshot });
 
       return { content: [{ type: "text" as const,
-        text: renderRunRecord(rec) + (watch.setupWarning ? `\n\n⚠ ${watch.setupWarning}` : "") }] };
+        text: notice + renderRunRecord(rec) + (watch.setupWarning ? `\n\n⚠ ${watch.setupWarning}` : "") }] };
     }
   );
 
@@ -454,13 +471,14 @@ export function createServer(session: BrowserSession): McpServer {
       }
 
       const handle = await session.getPage(pageId);
+      const notice = dialogNotice(handle);
       const collector = await DiagnosticsCollector.attach(handle);
       const tracker = await NetworkTracker.attach(handle);
       const refs = refTables.get(handle.pageId) ?? new Map<string, number>();
 
       const { auth: authState, error: authError } = await resolveAuth(auth);
       if (authError) {
-        return { isError: true, content: [{ type: "text" as const, text: authError }] };
+        return { isError: true, content: [{ type: "text" as const, text: notice + authError }] };
       }
 
       const demoSteps = (hasActions ? actions! : [step!]) as unknown as Step[];
@@ -487,12 +505,12 @@ export function createServer(session: BrowserSession): McpServer {
 
       if (outcome.status === "demo-failed") {
         return { isError: true, content: [{ type: "text" as const,
-          text: renderDemoFailure(outcome.failure) }] };
+          text: notice + renderDemoFailure(outcome.failure) }] };
       }
 
       if (outcome.status === "validation-failed") {
         if (!validationCountsAgainstBudget(outcome.validation)) {
-          return { isError: true, content: [{ type: "text" as const, text:
+          return { isError: true, content: [{ type: "text" as const, text: notice +
             `✋ 验证被用户打断（第 ${k + 1} 步的修复未能完成全量重放），trace 未写回、未计自愈次数，请重试。\n\n` +
             renderRunRecord(outcome.validation) }] };
         }
@@ -500,7 +518,7 @@ export function createServer(session: BrowserSession): McpServer {
         budget.perStep.set(k, (budget.perStep.get(k) ?? 0) + 1);
         budget.total += 1;
         healBudgets.set(tracePath, budget);
-        return { isError: true, content: [{ type: "text" as const, text:
+        return { isError: true, content: [{ type: "text" as const, text: notice +
           `❌ 修复未通过验证门（第 ${k + 1} 步的修复在新标签页全量重放时仍失败），trace 未写回。\n\n` +
           renderRunRecord(outcome.validation) }] };
       }
@@ -510,7 +528,7 @@ export function createServer(session: BrowserSession): McpServer {
       if (!outcome.dryRun) lastRunByTrace.set(tracePath, outcome.validation);
       const mode = outcome.dryRun ? "dry-run 验证通过（未写回）" : "已写回";
       progress.report(healTotal, healTotal, mode);
-      return { content: [{ type: "text" as const, text:
+      return { content: [{ type: "text" as const, text: notice +
         `✅ 自愈成功：第 ${k + 1} 步已由 ${(hasActions ? actions! : [step!]).length} 步修复替换，${mode}。\n\n` +
         renderRunRecord(outcome.validation) }] };
     }
@@ -530,13 +548,14 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async ({ path, pageId }) => {
       const handle = await session.getPage(pageId);
+      const notice = dialogNotice(handle);
       const auth = await captureAuth(handle);
       const p = path ?? "./.cuq/auth.json";
       await mkdir(dirname(p), { recursive: true });
       await writeFile(p, JSON.stringify(auth, null, 2) + "\n", "utf8");
       sessionAuth = auth;
       const lsCount = auth.origins.reduce((a, o) => a + Object.keys(o.localStorage).length, 0);
-      return { content: [{ type: "text" as const, text:
+      return { content: [{ type: "text" as const, text: notice +
         `已保存认证态到 ${p}（cookie ${auth.cookies.length} 条，localStorage ${lsCount} 项）。` +
         `后续 replay/replay_suite/heal 默认注入；登录过期后重新调用本工具。` }] };
     }
@@ -555,13 +574,14 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async ({ pageId, withScreenshot = true }) => {
       const handle = await session.getPage(pageId);
+      const notice = dialogNotice(handle);
       const c = await DiagnosticsCollector.attach(handle);
       const parts: Array<
         { type: "text"; text: string } | { type: "image"; data: string; mimeType: string }
       > = [
         {
           type: "text",
-          text:
+          text: notice +
             `## console 报错（最近 ${c.consoleErrors().length} 条）\n` +
             `${c.consoleErrors().join("\n") || "（无）"}\n\n` +
             `## 失败请求（最近 ${c.failedRequests().length} 条）\n` +

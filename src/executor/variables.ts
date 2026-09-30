@@ -13,8 +13,8 @@ export function interpolate(text: string, vars: Record<string, string>): string 
 
 export function interpolateStep(step: Step, vars: Record<string, string>): Step {
   const s = { ...step } as Record<string, unknown>;
-  for (const key of ["value", "url", "expected", "key"]) {
+  for (const key of ["value", "url", "expected", "key", "promptText"]) {
     if (typeof s[key] === "string") s[key] = interpolate(s[key] as string, vars);
   }
-  return s as Step;
+  return s as unknown as Step;
 }

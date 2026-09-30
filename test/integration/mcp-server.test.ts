@@ -328,4 +328,21 @@ describe("MCP server（真实 stdio 协议）", () => {
     const text = (await wait(42)).result.content[0].text;
     expect(text).toContain("2 步全部成功");
   });
+
+  it("两次调用之间弹出的 alert：下一次 snapshot 不挂住，并在结果里报告", async () => {
+    send({ jsonrpc: "2.0", id: 43, method: "tools/call", params: {
+      name: "batch",
+      arguments: { steps: [
+        { action: "navigate", url: `${inject("fixtureURL")}/dialogs.html` },
+        { action: "click", target: { descriptor: { strategies: [{ kind: "css", value: "#timer" }], framePath: [] } } }
+      ]}
+    }});
+    await wait(43);
+    await new Promise((r) => setTimeout(r, 2000)); // 按钮定时 1.5s：batch 返回后才弹出
+
+    send({ jsonrpc: "2.0", id: 44, method: "tools/call", params: { name: "snapshot", arguments: {} } });
+    const text = (await wait(44, 8000)).result.content[0].text;
+    expect(text).toContain("定时弹窗");
+    expect(text).toContain("页面快照");
+  });
 });

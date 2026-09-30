@@ -78,7 +78,17 @@ export interface ResolveResult {
 
 // ---------- 执行 ----------
 
-export type Step =
+/**
+ * 所有步骤共有的弹窗字段。dialog：本步触发 confirm/prompt 时确定还是取消，省略按默认确定；
+ * alert 与 beforeunload 总是放行。promptText：prompt 要填的文本，省略用弹窗自带的默认值。
+ * 固化时，按默认策略处理过弹窗的步骤会记下 dialog，回放据此复现。
+ */
+export interface StepDialogOptions {
+  dialog?: "accept" | "dismiss";
+  promptText?: string;
+}
+
+export type Step = StepDialogOptions & (
   | { action: "navigate"; url: string }
   | { action: "click"; target: TargetRef }
   /** sensitive：固化时发现目标是 type=password 输入框，save_trace 据此拒绝明文值 */
@@ -90,7 +100,8 @@ export type Step =
   | { action: "wait"; until: WaitCondition; timeout?: number }
   | { action: "sleep"; ms: number }
   | { action: "assert"; type: AssertType; target?: TargetRef; expected?: string } & ScreenshotAssertOptions
-  | { action: "extract"; target: TargetRef; as: string; from?: "text" | "value" };
+  | { action: "extract"; target: TargetRef; as: string; from?: "text" | "value" }
+);
 
 /** batch 里用 ref（本次快照的短期句柄）；trace 里用 descriptor（长期） */
 export type TargetRef = { ref: string } | { descriptor: Descriptor };
