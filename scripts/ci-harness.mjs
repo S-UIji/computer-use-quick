@@ -33,30 +33,59 @@ async function waitDevtools(ms = 20000) {
   fail("Chrome DevTools 端点未就绪");
 }
 
+async function devtoolsReady(browserURL, timeoutMs = 1000) {
+  if (!browserURL) return false;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch(new URL("/json/version", browserURL));
+      if (r.ok) return true;
+    } catch { /* 端口未监听或已断开 */ }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+}
+
 function readEnv() {
   if (!existsSync(ENV_FILE)) fail("未找到 .scratch/ci-env.json，先跑 up");
   return JSON.parse(readFileSync(ENV_FILE, "utf8"));
 }
 
 function cleanup(env) {
-  try { execSync(`taskkill /PID ${env.chromePid} /T /F`, { stdio: "ignore" }); } catch { /* 尽力 */ }
+  if (env?.chromePid) {
+    try { execSync(`taskkill /PID ${env.chromePid} /T /F`, { stdio: "ignore" }); } catch { /* 尽力 */ }
+  }
   // taskkill 返回时 Chrome 的文件句柄还没放完，不间隔的重试会在几毫秒内全部落空
-  let removed = false;
-  for (let i = 0; i < 10 && !removed; i++) {
-    try {
-      rmSync(env.profile, { recursive: true, force: true });
-      removed = true;
-    } catch {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+  if (env?.profile) {
+    let removed = false;
+    for (let i = 0; i < 10 && !removed; i++) {
+      try {
+        rmSync(env.profile, { recursive: true, force: true });
+        removed = true;
+      } catch {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+      }
     }
+    if (!removed) console.error(`⚠ 临时 profile 未能删除，可手动清理：${env.profile}`);
   }
   // 环境文件无条件删：留着它会让下一次 up 被「已有环境文件」挡住
   rmSync(ENV_FILE, { force: true });
-  if (!removed) console.error(`⚠ 临时 profile 未能删除，可手动清理：${env.profile}`);
 }
 
 if (cmd === "up") {
-  if (existsSync(ENV_FILE)) fail("已有环境文件，先 gate（自动清理）或 down");
+  if (existsSync(ENV_FILE)) {
+    let existing;
+    try {
+      existing = JSON.parse(readFileSync(ENV_FILE, "utf8"));
+    } catch {
+      existing = {};
+    }
+    if (await devtoolsReady(existing.browserURL)) {
+      fail("已有环境文件且 Chrome 仍在运行，先 gate（自动清理）或 down");
+    }
+    console.error("⚠ 检测到过期 CI 环境，自动清理后重新启动");
+    cleanup(existing);
+  }
   const profile = mkdtempSync(join(tmpdir(), "cuq-ci-"));
   // detached + unref：Chrome 必须活过本进程——up 先退出、gate 后启动，
   // 不脱离进程组的话，node 退出时 Chrome 会跟着被回收

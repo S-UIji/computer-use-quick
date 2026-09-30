@@ -1,0 +1,124 @@
+# computer-use-quick 全量端到端冒烟计划
+
+日期：2026-09-30  
+目标：用真实有头 Chrome、真实 MCP stdio 客户端和旁路“用户”连接，验证从探索到回放、自愈、并发、观察模式和浏览器生命周期的完整链路，并把模型/用户实际会遇到的不舒服之处记录成可修复的问题。
+
+## 执行原则
+
+- 每次测试使用独立 Chrome profile、独立 DevTools 端口和独立靶场数据。
+- 冒烟 trace 必须幂等：重复运行不会因为上一次新增的订单、cookie 或 localStorage 造成重复目标。
+- 每个场景同时记录 MCP 返回、进度通知、当前 URL、页面可见性、窗口边界、console/网络失败和用户实际截图。
+- “调用成功”不等于“用户体验通过”：任何额外模型往返、页面误切换、错误归因、遮挡、无意义噪音都单独记为问题。
+- 完成代码改动后先 `npm run build`，再执行下列真实浏览器流程；结束时必须 `ci-harness down`。
+
+## 环境准备
+
+```powershell
+npm run build
+node scripts/ci-harness.mjs down        # 清理可能过期的环境文件
+node scripts/ci-harness.mjs up --headed
+node scripts/e2e-smoke.mjs
+```
+
+读取 `.scratch/ci-env.json` 中的 `browserURL`，以此启动 MCP 客户端。所有临时 trace、截图和日志放在 `.scratch/e2e-<timestamp>/`。
+
+真实客户端必须覆盖：
+
+- `initialize` / `notifications/initialized`
+- `snapshot`、`batch`、`list_pages`
+- `save_trace`、`replay`、`replay_suite`
+- `save_auth`、`heal_step`
+- `inspect`
+- 带 `progressToken` 和不带 `progressToken` 两种调用
+
+## 测试矩阵
+
+| 编号 | 场景 | 关键步骤 | 通过标准 |
+|---|---|---|---|
+| E0 | 环境幂等 | 旧 `.scratch/ci-env.json` + 端口已死后执行 `up` | 自动清理过期文件并继续，不能要求人工 `down` |
+| E1 | 首次连接 | Chrome 未开时连接 MCP，再启动 Chrome | MCP 握手成功；工具返回可执行启动指引 |
+| E2 | 探索登录 | snapshot → batch 填写账号/密码 → 点击登录 | 一次 batch 完成；密码不进 trace；进度按步骤到达 |
+| E3 | 快照可操作性 | 检查工具栏、表格、对话框、同名按钮 | 叶子交互元素直接有 ref；表格按行组织；不需要无意义 `expand` |
+| E4 | 异步与等待 | 网络异步、纯定时器、visible/hidden、重复目标 | 网络等待按接口完成；纯定时器需要显式 wait；歧义报 `ambiguous` 和匹配数；hidden 不假通过 |
+| E5 | 探索固化 | 正常 batch → save_trace；明文凭证 → save_trace | 占位符保留；明文被拒；trace 可读、可回放 |
+| E6 | 正常回放 | 独立 Context 中 replay 完整 trace | 零模型往返、步骤台账完整、失败上下文为空 |
+| E7 | 缺变量预检 | replay/replay_suite/heal 缺少 `${VAR}` | 零步执行、零窗口副作用，列出全部缺失变量；不误用 `PWD/HOME/PATH` 等系统变量 |
+| E8 | 视觉断言 | 首次建基线 → 通过 → 改样式失败 → 更新基线 | actual/expected/diff 可读；视觉失败不可自愈 |
+| E9 | 单点自愈 | 改名造成定位失败 → snapshot/batch 演示 → heal_step | 演示成功、独立 Context 验证成功、原子写回、再 replay 全绿 |
+| E10 | 多点自愈 | 同一 trace 制造两个独立定位故障 | 结果明确指出修复步是否已通过、阻塞点是否后移；预算不误扣；存在可继续修复路径 |
+| E11 | 并发回放 | replay_suite 3 条、重试、heal 验证 | Context/cookie 隔离；有头窗口不重叠；重试不新增失控窗口；进度尽早出现 |
+| E12 | JS 弹窗 | confirm/prompt/alert、两次调用之间弹窗、加载即弹窗 | 调用不挂；策略和弹窗内容写入结果；步骤级 dismiss/accept 可复现 |
+| E13 | 用户介入 | 执行中点击/按键/滚动；执行间切标签 | 点击/按键在步骤边界变为 `user-interrupted`；滚动只告警；后续指引明确 |
+| E14 | 标签页安全 | 关闭被操作页；再调用不带 pageId 的 batch | 不接管用户其他标签；错误说明页面已关闭或新开页 |
+| E15 | 页面变化 | snapshot 后用户退出/导航，再提交旧 ref | 返回 URL 变化提示和“先 snapshot”建议；失败上下文带当前 URL |
+| E16 | 观察模式 | active/idle/interrupted、导航期间、截图 | idle 不遮挡页面；导航后标注无明显缺口；步骤说明包含动作和目标 |
+| E17 | 生命周期 | 浏览器关闭 → 工具调用 → 重开同端口 | 断开后给出指引；重开后同一 MCP 会话自动重连并一次性告知旧 ref 失效 |
+| E18 | 输出质量 | 故意失败、favicon 404、坏步骤、suite 失败 | 过滤无关噪音；坏步骤给可读输入错误；结果带 URL/title；机读收尾行稳定 |
+
+## 一次完整执行顺序
+
+1. 清理并启动有头 Chrome，记录 PID、profile、端口和屏幕尺寸。
+2. 在 Chrome 未开时启动一个独立 MCP 服务，验证 E1；随后启动 Chrome并复用该服务。
+3. 使用独立靶场完成登录、订单创建、订单刷新、订单删除、对话框开关、帮助页新标签和退出。
+4. 在每一次 `snapshot` 后记录：快照文本、ref 数、折叠组数、URL、title。重点检查工具栏和表格是否把可操作目标折叠掉。
+5. 固化一条包含登录、异步等待、弹窗和新增订单的 trace；先用明文密码故意触发拒绝，再用变量占位符保存。
+6. 在新 BrowserContext 中 replay；用另一个版本页面制造按钮改名和重复订单两类定位故障。
+7. 分别执行单点 heal 和多点 heal，检查验证门是否把“修复点已通过、后续点失败”说清楚。
+8. 复制三条 trace 做 replay_suite，观察开始进度、重试、窗口边界、失败合并和最终 `SUITE_RESULT`。
+9. 旁路用户连接执行：运行中点击、按键、滚动、切换标签、关闭被操作页、修改 URL，并保存用户实际看到的截图。
+10. 关闭浏览器、重开浏览器、重试工具；确认同一服务无需重启即可恢复。
+11. 保存所有日志后执行 `node scripts/ci-harness.mjs down`，确认临时 profile 和环境文件被清理。
+
+## 本次真实执行结果（2026-09-30）
+
+已执行：`.scratch/e2e-ux.mjs`、`.scratch/e2e-smoke.mjs`、`.scratch/e2e-ux-probe.mjs`，均使用真实有头 Chrome 和 MCP stdio。证据保存在：
+
+- `.scratch/e2e-ux/log.md`
+- `.scratch/e2e-ux-probe-current.log`
+- `.scratch/e2e-ux/s1-idle.png`
+- `.scratch/e2e-ux/s2c-user-view.png`
+- `.scratch/e2e-ux/s5-heal-validation.png`
+- `.scratch/e2e-ux/s6-suite-window.png`
+
+通过或基本通过：
+
+- R1 凭证保护：明文保存被拒，变量占位符保留。
+- R2 弹窗：confirm 约 235ms 返回，加载即 alert 约 537ms 返回；结果包含弹窗内容和处理策略。
+- R3 生命周期：浏览器关闭后返回启动指引，重开后同一服务自动重连。
+- R6 等待歧义：回放中正确报告 `ambiguous`，并给出“最后一次定位匹配到 N 个”。
+- 用户介入识别：点击会在步骤边界停止并标红，滚动只告警，退出时标注被清理。
+
+本次仍失败或体验明显不舒服：
+
+| 编号 | 证据 | 结论 |
+|---|---|---|
+| BUG-01 | `snapshot` 把“刷新/新建订单/删除全部”和表格内容折叠；需要额外 `expand` | R4 未修，探索多一次往返，ref 丢失 |
+| BUG-02 | `e2e-smoke` 的“好” trace 在重复订单数据下第 5 步变为 `ambiguous`，suite 0/2；heal 也无法验证 | 冒烟数据未隔离、trace 不幂等；R6 正确暴露了原有测试设计问题 |
+| BUG-03 | heal 第 6 步演示成功，但第 10 步因重复数据失败；结果仍说“第 6 步修复失败” | R5，多故障时文案和预算误导，验证门无法继续推进 |
+| BUG-04 | 关闭被操作标签后，不带 pageId 的下一次 batch 接管剩余用户标签并导航 | R7，存在误操作用户页面的风险 |
+| BUG-05 | 用户退出后旧 descriptor 失败只报 `target-not-found`，没有 URL 变化提示 | R8，agent 不知道页面已被用户改过 |
+| BUG-06 | idle 角标长期位于顶部中央，遮住页面顶部内容 | R10，待命态应移到角落并缩短文案 |
+| BUG-07 | 慢导航期间约 200ms 采样不到 overlay（日志为 2/5 个采样缺失） | R12，跨文档导航时标注有空窗 |
+| BUG-08 | suite 3 并发 + 重试窗口出现在 (20,20)、(30,30)…，6 个窗口互相覆盖 | R13，无法同时观察并发任务 |
+| BUG-09 | 用户切到帮助页后，agent 执行刷新会把被操作页拉回前台，帮助页变 hidden | R14，打断用户当前工作 |
+| BUG-10 | 被打断结果没有“先确认用户完成，再 snapshot，再从第 N 步重提”的下一步指引 | R15，agent 容易立即重试并与用户抢页面 |
+| BUG-11 | 所有失败现场都带 `favicon.ico` 404；suite 确定性定位失败仍完整重试 | R16/R17，噪音和等待成本都偏高 |
+| BUG-12 | 旧 `.scratch/ci-env.json` 指向已死 Chrome 时，`ci-harness up` 直接拒绝 | R18，本次已真实复现 |
+| BUG-13 | 外部 `localhost:3040` 的固定 `smoke-login.json` 在组织页出现 30 个同名按钮时，容器锚定仍报歧义 | 外部靶场/trace 与本仓库隔离冒烟分开跟踪；新 `scripts/e2e-smoke.mjs` 不再依赖它 |
+
+## 修复优先级
+
+1. **先修数据隔离与冒烟可重复性**：每次运行生成唯一订单/账号数据，或由靶场提供 reset API；否则后续 R5/R6/E10 结果会被污染。
+2. **修 R7 + R8**：这两项会直接修改用户页面或误导 agent，优先级高于视觉细节。
+3. **修 R4**：快照可操作性直接决定探索是否真的节省模型往返。
+4. **修 R5**：多故障自愈必须能继续推进，不能把后续失败归咎于已通过的修复。
+5. **修 R10/R12/R13/R14/R15**：集中改善有头观察模式的可见性、窗口管理和用户协作。
+6. **修 R16/R17/R18**：收敛 suite 报告、失败噪音和 CI 环境自恢复。
+
+## 每次修复的验收门槛
+
+- 相关单元/集成测试全绿。
+- 本计划对应场景在干净 profile、干净数据上重复运行至少两次。
+- 失败场景必须验证错误类型、文案、当前 URL、候选信息和进度通知，而不是只看退出码。
+- 有头场景必须检查截图和窗口边界；headless 场景必须再跑一次，确保观察模式改动没有污染 CI。
+- 所有结果可由 `log.md`、截图和 `SUITE_RESULT` 收尾行复核。

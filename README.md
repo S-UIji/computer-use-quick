@@ -168,6 +168,8 @@ node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1�
 捕获一次后自动注入，用例不必每条都登录。自愈有服务端护栏：只修定位类失败、单步≤2 次、
 一轮≤3 处、断言失败拒修（转人工），全自动写回前必过独立 Context 验证门。
 
+本地要跑可重复的二期闭环冒烟：`node scripts/e2e-smoke.mjs`。它自带随机端口的临时 SUT，连续两轮验证 `replay_suite → heal_step → replay_suite`；运行前先 `node scripts/ci-harness.mjs up`，结束后 `node scripts/ci-harness.mjs down`。
+
 ## 观察模式（有头时自动启用）
 
 连接的是有头 Chrome 时，服务端自动进入观察模式（`CUQ_WATCH=auto`，可设 `on` / `off` 覆盖）：
@@ -219,7 +221,7 @@ SIGTERM、Ctrl+C）或调用 `BrowserSession.close()` 时会先撤掉所有标�
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（52 个文件 / 388 个测试）
+npm test                  # 先 tsc 构建再跑全部（52 个文件 / 402 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```
