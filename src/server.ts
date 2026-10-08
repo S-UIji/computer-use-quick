@@ -11,10 +11,11 @@ import { diffLines, renderDiff } from "./perception/diff.js";
 import { DiagnosticsCollector } from "./diagnostics/collector.js";
 import { NetworkTracker } from "./waiter/stability.js";
 import { runBatch } from "./executor/batch.js";
+import { resolveVariables, inspectVariables, MissingVariablesError, variableSourceNotice } from "./executor/variables.js";
 import { saveTrace, loadTraceSnapshot, canonicalTracePath } from "./trace/store.js";
 import { replayTrace } from "./trace/replay.js";
 import {
-  checkHealGate, runHeal, runMultiHeal, renderDemoFailure, validationCountsAgainstBudget,
+  checkHealGate, runHeal, runMultiHeal, buildHealedTrace, renderDemoFailure, validationCountsAgainstBudget,
   HEALABLE_KINDS, MAX_HEALS_PER_TRACE, type HealBudget
 } from "./trace/heal.js";
 import { checkConcurrency, runSuite } from "./trace/suite.js";
@@ -23,6 +24,7 @@ import { archiveRun } from "./report/archive.js";
 import { renderSuiteResult, renderTraceEvent } from "./report/suiteReport.js";
 import { renderRunRecord } from "./report/runRecord.js";
 import { interruptionRecovery } from "./report/interruptionRecovery.js";
+import { createVariableRedactor, redactVariableFailure, redactVariableSnapshot } from "./report/variablePrivacy.js";
 import { captureAuth, applyAuth, loadAuth, type AuthState } from "./session/auth.js";
 import { RunWatch } from "./watch/runWatch.js";
 import { ProgressReporter } from "./watch/progress.js";
@@ -203,8 +205,12 @@ export function createServer(session: BrowserSession): McpServer {
       }
     },
     async ({ pageId, steps, vars, stability, resolveRetryMs }, extra) => {
+      const variableState = resolveVariables(vars);
+      const variableCheck = inspectVariables(steps as Step[], variableState.values, variableState.environmentNames);
+      let redact = createVariableRedactor(variableState.values, variableCheck.environmentUsed);
       const handle = await session.getPage(pageId);
-      const notice = pageChangeNotice(observedUrls.get(handle.pageId), handle.page.url()) + notices(session, handle);
+      const notice = variableSourceNotice(variableCheck.environmentUsed) +
+        redact(pageChangeNotice(observedUrls.get(handle.pageId), handle.page.url()) + notices(session, handle));
       const collector = await DiagnosticsCollector.attach(handle);
       const tracker = await NetworkTracker.attach(handle);
       const refs = refTables.get(handle.pageId) ?? new Map<string, number>();
@@ -214,11 +220,12 @@ export function createServer(session: BrowserSession): McpServer {
       });
       const r = await runBatch({
         handle, tracker, collector, refs,
-        vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
+        vars: variableState.values, environmentNames: variableState.environmentNames,
         steps: steps as unknown as Step[],
         stability, resolveRetryMs,
         observer: watch
       });
+      redact = createVariableRedactor(variableState.values, variableCheck.environmentUsed, r.variableRedactions);
       refTables.set(handle.pageId, refs);
       recordSteps(handle.pageId, r.capturedSteps);
       // 成功与步骤失败都已把现场返回给调用方，以批次终态作为下一次比较基线。
@@ -226,17 +233,17 @@ export function createServer(session: BrowserSession): McpServer {
 
       if (r.ok) {
         const total = r.results.reduce((a, s) => a + s.durationMs, 0);
-        const warnings = r.results.filter((s) => s.error).map((s) => `第 ${s.index + 1} 步：${s.error}`);
+        const warnings = r.results.filter((s) => s.error).map((s) => `第 ${s.index + 1} 步：${redact(s.error!)}`);
         const overflow = stepOverflowWarning(sessionSteps.get(handle.pageId)?.length ?? 0);
         if (overflow) warnings.push(overflow);
         if (watch.setupWarning) warnings.push(watch.setupWarning);
         return { content: [{ type: "text" as const, text: notice +
           `✅ ${r.results.length} 步全部成功（合计 ${total}ms）\n` +
           (warnings.length ? `\n⚠ ${warnings.join("\n⚠ ")}\n` : "") +
-          `\n## 执行后快照\n${r.snapshot}` }] };
+          `\n## 执行后快照\n${redactVariableSnapshot(r.snapshot, redact)}` }] };
       }
 
-      const f = r.failure!;
+      const f = redactVariableFailure(r.failure!, redact);
       const head = f.kind === "user-interrupted"
         ? `✋ 第 ${f.failedIndex + 1} 步：user-interrupted（被用户打断，不是页面问题）`
         : `❌ 第 ${f.failedIndex + 1} 步失败：${f.kind}`;
@@ -350,8 +357,16 @@ export function createServer(session: BrowserSession): McpServer {
       }
     },
     async ({ tracePath, vars, slowMoMs, resolveRetryMs, pageId, auth, updateBaselines }, extra) => {
+      tracePath = await canonicalTracePath(tracePath);
+      const { trace, fingerprint } = await loadTraceSnapshot(tracePath);
+      const variableState = resolveVariables(vars);
+      const variableCheck = inspectVariables(trace.steps, variableState.values, variableState.environmentNames);
+      if (variableCheck.missing.length) {
+        return { isError: true, content: [{ type: "text" as const,
+          text: notices(session) + new MissingVariablesError(variableCheck.missing).message }] };
+      }
       const handle = await session.getPage(pageId);
-      const notice = notices(session, handle);
+      const notice = variableSourceNotice(variableCheck.environmentUsed) + notices(session, handle);
       const collector = await DiagnosticsCollector.attach(handle);
       const tracker = await NetworkTracker.attach(handle);
       collector.clear();
@@ -363,15 +378,13 @@ export function createServer(session: BrowserSession): McpServer {
       // 认证态注入抢在 replay 的 navigate 之前——localStorage 播种随新文档生效
       if (authState) await applyAuth(handle, authState);
 
-      tracePath = await canonicalTracePath(tracePath);
-      const { trace, fingerprint } = await loadTraceSnapshot(tracePath);
       const watch = new RunWatch({
         handle, label: trace.name, watch: session.watchEnabled,
         progress: ProgressReporter.from(extra), progressPrefix: `${trace.name} · `
       });
       const rec = await replayTrace({
         handle, tracker, collector, trace, slowMoMs, resolveRetryMs,
-        vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
+        vars: variableState.values, environmentNames: variableState.environmentNames,
         visual: { traceName: trace.name, updateBaselines },
         observer: watch
       });
@@ -421,11 +434,12 @@ export function createServer(session: BrowserSession): McpServer {
       if (authError) {
         return { isError: true, content: [{ type: "text" as const, text: authError }] };
       }
+      const variableState = resolveVariables(vars);
       const progress = ProgressReporter.from(extra);
       let doneCount = 0;
       const result = await runSuite({
         session, paths: await Promise.all(tracePaths.map(canonicalTracePath)),
-        vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
+        vars: variableState.values, environmentNames: variableState.environmentNames,
         concurrency: gate.value, slowMoMs, resolveRetryMs,
         auth: authState,
         updateBaselines,
@@ -441,7 +455,8 @@ export function createServer(session: BrowserSession): McpServer {
       for (const t of result.results) {
         if (t.record && t.traceFingerprint) rememberRun(t.path, t.traceFingerprint, t.record);
       }
-      return { content: [{ type: "text" as const, text: notices(session) + renderSuiteResult(result) }] };
+      return { isError: result.preflightFailed || undefined, content: [{ type: "text" as const,
+        text: notices(session) + variableSourceNotice(result.environmentUsed ?? []) + renderSuiteResult(result) }] };
     }
   );
 
@@ -516,11 +531,22 @@ export function createServer(session: BrowserSession): McpServer {
         // 稳定步骤形态在任何页面动作前完成完整校验；actions 在捕获 descriptor 后校验。
         if (stableRepairs) buildRepairPlan(trace, stableRepairs);
         if (step) buildRepairPlan(trace, [{ stepIndex: k!, steps: [step as Step] }]);
+        const demoSteps = (actions ?? (step ? [step] : [])) as Step[];
+        const variableState = resolveVariables(vars);
+        const candidate = stableRepairs
+          ? buildRepairPlan(trace, stableRepairs).trace
+          : buildHealedTrace(trace, k!, demoSteps);
+        const checks = [
+          inspectVariables(candidate.steps, variableState.values, variableState.environmentNames),
+          ...(!stableRepairs ? [inspectVariables(demoSteps, variableState.values, variableState.environmentNames)] : [])
+        ];
+        const missing = [...new Set(checks.flatMap((check) => check.missing))].sort();
+        if (missing.length) return fail(new MissingVariablesError(missing).message);
+        const sourceNotice = variableSourceNotice(checks.flatMap((check) => check.environmentUsed));
         const { auth: authState, error: authError } = await resolveAuth(auth);
         if (authError) return fail(authError);
 
         const progress = ProgressReporter.from(extra);
-        const demoSteps = (actions ?? (step ? [step] : [])) as Step[];
         const allRepairs = stableRepairs ?? [{ stepIndex: k!, steps: demoSteps }];
         const candidateCount = trace.steps.length - allRepairs.length +
           allRepairs.reduce((sum, repair) => sum + repair.steps.length, 0);
@@ -528,7 +554,7 @@ export function createServer(session: BrowserSession): McpServer {
         const healTotal = demoCount + candidateCount;
         const common = {
           session, tracePath, trace, expectedFingerprint: fingerprint,
-          vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
+          vars: variableState.values, environmentNames: variableState.environmentNames,
           dryRun, auth: authState,
           validationObserverFor: (vHandle: PageHandle) => new RunWatch({
             handle: vHandle, label: "自愈验证", watch: session.watchEnabled,
@@ -538,11 +564,11 @@ export function createServer(session: BrowserSession): McpServer {
         let notice: string;
         let outcome: Awaited<ReturnType<typeof runHeal>>;
         if (stableRepairs) {
-          notice = notices(session);
+          notice = sourceNotice + notices(session);
           outcome = await runMultiHeal({ ...common, repairs: stableRepairs });
         } else {
           const handle = await session.getPage(pageId);
-          notice = notices(session, handle);
+          notice = sourceNotice + notices(session, handle);
           const collector = await DiagnosticsCollector.attach(handle);
           const tracker = await NetworkTracker.attach(handle);
           const refs = refTables.get(handle.pageId) ?? new Map<string, number>();

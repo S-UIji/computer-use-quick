@@ -22,7 +22,8 @@ export function renderSuiteResult(r: SuiteResult): string {
         `${(t.durationMs / 1000).toFixed(1)}s`
       );
     } else if (t.error !== undefined) {
-      lines.push(`✗ ${t.name} — 未预期异常：${t.error}`);
+      const label = t.attempts === 0 ? "预检未通过，未执行" : "未预期异常";
+      lines.push(`✗ ${t.name} — ${label}：${t.error}`);
     } else {
       const f = t.record?.failure;
       lines.push(
@@ -61,7 +62,8 @@ export function renderSuiteResult(r: SuiteResult): string {
 /** 用例级进度说明（replay_suite 推送 notifications/progress 用） */
 export function renderTraceEvent(e: TraceEvent): string {
   const t = e.result;
-  const kind = t.record?.failure?.kind ?? (t.error !== undefined ? "unexpected-error" : "unknown");
+  const kind = t.attempts === 0 ? "preflight-failed"
+    : t.record?.failure?.kind ?? (t.error !== undefined ? "unexpected-error" : "unknown");
   if (e.kind === "retrying") return `${t.name} ✗ ${kind}，重试中`;
   if (t.ok) return `${t.name} ✓ ${(t.durationMs / 1000).toFixed(1)}s${t.flaky ? "（flaky）" : ""}`;
   if (t.interrupted) return `${t.name} ✋ 被用户打断`;

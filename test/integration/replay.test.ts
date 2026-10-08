@@ -60,10 +60,11 @@ describe("replayTrace", () => {
     expect((await run(t, { USER: "admin", PWD: "s3cret" })).ok).toBe(true);
   });
 
-  it("缺变量时失败并给出明确信息", async () => {
-    const rec = await run(loginTrace(fx.url), { USER: "admin" });
-    expect(rec.ok).toBe(false);
-    expect(rec.failure?.message).toContain("PWD");
+  it("缺变量时执行前拒绝并给出明确信息，当前页面不变", async () => {
+    const handle = await session.getPage();
+    const before = handle.page.url();
+    await expect(run(loginTrace(fx.url), { USER: "admin" })).rejects.toThrow(/PWD/);
+    expect(handle.page.url()).toBe(before);
   });
 
   it("定位失败时标 heal_required 并带完整失败上下文", async () => {

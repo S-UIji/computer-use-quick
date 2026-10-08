@@ -4,6 +4,8 @@ import type { DiagnosticsCollector } from "../diagnostics/collector.js";
 import type { RunRecord, Trace, Step, Descriptor, VisualOptions } from "../types.js";
 import type { StepObserver } from "../executor/observer.js";
 import { runBatch } from "../executor/batch.js";
+import { assertVariables, inspectVariables } from "../executor/variables.js";
+import { createVariableRedactor, redactVariableRecord } from "../report/variablePrivacy.js";
 
 export interface ReplayOptions {
   handle: PageHandle;
@@ -11,6 +13,7 @@ export interface ReplayOptions {
   collector: DiagnosticsCollector;
   trace: Trace;
   vars: Record<string, string>;
+  environmentNames?: ReadonlySet<string>;
   /** 每步之间的额外延迟，用于演示场景让人看得见操作。默认 0。 */
   slowMoMs?: number;
   /** 目标解析的轮询重试预算（ms），默认 3000；传 0 恢复一次性解析 */
@@ -75,6 +78,9 @@ export function pageClosedRecord(trace: Trace, message: string, startedAt: numbe
 }
 
 export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
+  assertVariables(opts.trace.steps, opts.vars);
+  const origins = inspectVariables(opts.trace.steps, opts.vars, opts.environmentNames).environmentUsed;
+
   const startedAt = new Date().toISOString();
   const t0 = Date.now();
 
@@ -101,7 +107,7 @@ export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
     refs: new Map(),
     vars: opts.vars,
     steps: withSlowMo,
-    captureDescriptors: false,
+    captureDescriptors: false, environmentNames: opts.environmentNames,
     resolveRetryMs: opts.resolveRetryMs,
     visual: opts.visual,
     observer: opts.observer ? remapObserver(opts.observer, realIndex, steps.length) : undefined
@@ -128,7 +134,7 @@ export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
     failure = { ...failure, failedIndex: idx, failedStep: steps[idx] };
   }
 
-  return {
+  const record: RunRecord = {
     traceName: opts.trace.name,
     startedAt,
     durationMs: Date.now() - t0,
@@ -140,4 +146,5 @@ export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
     healRequired: !r.ok && failure?.kind !== "user-interrupted" && failure?.kind !== "page-closed",
     artifacts: r.artifacts.length > 0 ? r.artifacts : undefined
   };
+  return redactVariableRecord(record, createVariableRedactor(opts.vars, origins, r.variableRedactions));
 }

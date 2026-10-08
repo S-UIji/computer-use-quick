@@ -8,7 +8,7 @@ import { describeInterruption, type StepObserver } from "./observer.js";
 import { runAction, type ActionContext } from "./actions.js";
 import type { StabilityOptions } from "../waiter/stability.js";
 import { runAssert, AssertionFailure } from "../assertion/assert.js";
-import { interpolateStep } from "./variables.js";
+import { interpolateStep, variableFieldMappings, type VariableTextMapping } from "./variables.js";
 import { LocatorError } from "../locator/resolve.js";
 import { takeSnapshot } from "../perception/snapshot.js";
 import { buildDescriptor } from "../locator/descriptor.js";
@@ -21,6 +21,7 @@ export interface BatchOptions {
   collector: DiagnosticsCollector;
   refs: Map<string, number>;
   vars: Record<string, string>;
+  environmentNames?: ReadonlySet<string>;
   steps: Step[];
   /** 成功执行后是否把 {ref} 固化成 {descriptor}，供 save_trace 使用。replay 时传 false。 */
   captureDescriptors?: boolean;
@@ -41,6 +42,8 @@ export interface BatchResult {
   snapshot: string;
   /** 固化后的步骤：所有 {ref} 已替换为 {descriptor}，可直接写进 trace */
   capturedSteps: Step[];
+  /** 仅供诊断脱敏的运行时字段映射，不写入 trace。 */
+  variableRedactions?: VariableTextMapping[];
   /** 失败现场产物（视觉断言三图等），随结果上交归档 */
   artifacts: RunArtifact[];
   failure?: FailureContext;
@@ -132,7 +135,7 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
     handle: opts.handle,
     tracker: opts.tracker,
     refs: opts.refs,
-    vars: { ...opts.vars },
+    vars: Object.assign(Object.create(null), opts.vars),
     stability: opts.stability,
     resolveRetryMs: opts.resolveRetryMs ?? 3000,
     visual: opts.visual,
@@ -142,9 +145,12 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
 
   const results: StepResult[] = [];
   const capturedSteps: Step[] = [];
+  const variableRedactions: VariableTextMapping[] = [];
+  const activeEnvironment = new Set(opts.environmentNames);
   const fail = (failure: FailureContext): BatchResult => ({
     ok: false, results, vars: ctx.vars, snapshot: failure.snapshot,
-    capturedSteps, artifacts: ctx.artifacts ?? [], failure
+    capturedSteps, artifacts: ctx.artifacts ?? [], failure,
+    ...(variableRedactions.length ? { variableRedactions } : {})
   });
 
   await obs?.onRunStart(opts.steps.length);
@@ -160,6 +166,7 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
     try {
       assertPageOpen(opts.handle);
       const step = interpolateStep(raw, ctx.vars);
+      variableRedactions.push(...variableFieldMappings(raw, step, activeEnvironment));
       dialogs?.setStep(step);
       // ref 是单次快照内的短期句柄，不能进 trace，要固化成长期 descriptor。
       // 固化的时机必须早于动作本身：动作一旦触发导航或打开新标签，原元素就失效了，
@@ -199,6 +206,7 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
       }
       assertPageOpen(opts.handle);
       ctx.onResolved = undefined;
+      if (step.action === "extract") activeEnvironment.delete(step.as);
       if (ctx.lastWaitTimedOut) {
         // 打满上限不抛错是设计（等不到静默不耽误干活），但这笔开销必须显形——
         // 否则持续流量页面上每一步都在静默地白付整个 timeout
@@ -318,5 +326,6 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
   if (late.length && last) last.error = [last.error, ...late].filter(Boolean).join("；");
 
   await obs?.onRunEnd({ ok: true, interrupted: false });
-  return { ok: true, results, vars: ctx.vars, snapshot: final.text, capturedSteps, artifacts: ctx.artifacts ?? [] };
+  return { ok: true, results, vars: ctx.vars, snapshot: final.text, capturedSteps, artifacts: ctx.artifacts ?? [],
+    ...(variableRedactions.length ? { variableRedactions } : {}) };
 }

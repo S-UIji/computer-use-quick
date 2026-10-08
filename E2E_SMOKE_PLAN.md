@@ -205,6 +205,15 @@ node scripts/e2e-smoke.mjs
 - 最终 headless 两轮隔离冒烟全绿，复跑墙钟 2522ms、2380ms。专属浏览器、客户端、HTTP 服务和临时目录已清理，ci-env 已删除。
 - 证据：`.scratch/r15-full-test.log`、`r15-targeted.log`、`r15-smoke.log`、`r15-evidence/result.json`、`progress.json`、各轮阶段报告和截图。
 
+## R9 变量来源与预检验收（2026-10-08）
+
+- 落实 B 方案：显式 vars 优先，系统环境字段禁止隐式回退；普通应用环境来源仅列名称。
+- replay/suite/heal 在浏览器副作用前检查全部支持字段，按序保留 extract 动态变量；suite 固定预检快照，一条缺失全批未执行。
+- 诊断文本按实际插值字段映射恢复占位符，覆盖短值拼接、URL编码、旧占位符和快照ref；数值和原始步骤不改，原始截图仍按现场规则处理。
+- 初始真实 MCP 复现环境 PWD 假成功与缺变量后的导航；修复后二轮均确认拒绝零导航、显式值可恢复。独立代码审查通过。
+- 最终全量：69 文件 / 567 测试全绿，326.22s。初跑基线一次敏感 URL 提示断言失败，定向复验及最终全量均通过，R8 未改。
+- 证据：`.scratch/r9-evidence/before.json`、`after.json`、`r9-mcp-after.log`、`r9-full-test.log`、`r9-privacy-complete.log`。临时浏览器及目录已清理。
+
 ## 每次修复的验收门槛
 
 - 相关单元/集成测试全绿。

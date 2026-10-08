@@ -4,6 +4,8 @@ import type {
   FailureContext, FailureKind, HealOutcome, RunRecord, Step, Trace
 } from "../types.js";
 import { runBatch } from "../executor/batch.js";
+import { inspectVariables, MissingVariablesError } from "../executor/variables.js";
+import { createVariableRedactor, redactVariableFailure } from "../report/variablePrivacy.js";
 import { NetworkTracker } from "../waiter/stability.js";
 import { DiagnosticsCollector } from "../diagnostics/collector.js";
 import { replayTrace, pageClosedRecord } from "./replay.js";
@@ -105,6 +107,7 @@ export interface RunHealOptions {
   stepIndex: number;
   demoSteps: Step[];
   vars: Record<string, string>;
+  environmentNames?: ReadonlySet<string>;
   dryRun: boolean;
   /** 认证态：验证门 Context 与正式回放一致注入（登录态 trace 否则必挂） */
   auth?: AuthState;
@@ -122,6 +125,7 @@ export interface RunMultiHealOptions {
   trace: Trace;
   repairs: TraceRepair[];
   vars: Record<string, string>;
+  environmentNames?: ReadonlySet<string>;
   dryRun: boolean;
   expectedFingerprint?: string;
   auth?: AuthState;
@@ -136,14 +140,22 @@ export type PlannedHealOutcome =
 
 /** 单点先捕获稳定步骤，再与多点提交共用完整验证和一次写回。 */
 export async function runHeal(opts: RunHealOptions): Promise<PlannedHealOutcome> {
+  const candidate = buildHealedTrace(opts.trace, opts.stepIndex, opts.demoSteps);
+  const demoOrigins = inspectVariables(opts.demoSteps, opts.vars, opts.environmentNames).environmentUsed;
+
+  const missing = [...new Set([
+    ...inspectVariables(opts.demoSteps, opts.vars).missing,
+    ...inspectVariables(candidate.steps, opts.vars).missing
+  ])].sort();
+  if (missing.length) return { status: "rejected", reason: new MissingVariablesError(missing).message };
   const expectedFingerprint = opts.expectedFingerprint ?? (await loadTraceSnapshot(opts.tracePath)).fingerprint;
   const demo = await runBatch({
     handle: opts.handle, tracker: opts.tracker, collector: opts.collector,
-    refs: opts.refs, vars: opts.vars, steps: opts.demoSteps,
+    refs: opts.refs, vars: opts.vars, steps: opts.demoSteps, environmentNames: opts.environmentNames,
     captureDescriptors: true, observer: opts.demoObserver
   });
   if (!demo.ok) {
-    return { status: "demo-failed", stepIndex: opts.stepIndex, failure: demo.failure! };
+    return { status: "demo-failed", stepIndex: opts.stepIndex, failure: redactVariableFailure(demo.failure!, createVariableRedactor(opts.vars, demoOrigins, demo.variableRedactions)) };
   }
   if (!demo.capturedSteps.length || demo.capturedSteps.length !== opts.demoSteps.length) {
     return { status: "rejected", reason: "演示步骤捕获不完整，无法安全生成修复；trace 未写回、未计自愈次数，请重新 snapshot 并演示。" };
@@ -158,6 +170,8 @@ export async function runHeal(opts: RunHealOptions): Promise<PlannedHealOutcome>
 export async function runMultiHeal(opts: RunMultiHealOptions): Promise<PlannedHealOutcome> {
   const plan = buildRepairPlan(opts.trace, opts.repairs);
   const healed = plan.trace;
+  const { missing } = inspectVariables(healed.steps, opts.vars);
+  if (missing.length) return { status: "rejected", reason: new MissingVariablesError(missing).message };
   assertNoSecrets(healed);
   const expectedFingerprint = opts.expectedFingerprint ?? (await loadTraceSnapshot(opts.tracePath)).fingerprint;
   let resource: Awaited<ReturnType<BrowserSession["newIsolatedPage"]>> | undefined;
@@ -171,7 +185,7 @@ export async function runMultiHeal(opts: RunMultiHealOptions): Promise<PlannedHe
     if (opts.auth) await applyAuth(vHandle, opts.auth);
     validation = await replayTrace({
       handle: vHandle, tracker: vTracker, collector: vCollector,
-      trace: healed, vars: opts.vars,
+      trace: healed, vars: opts.vars, environmentNames: opts.environmentNames,
       visual: { traceName: opts.trace.name, baselineRoot: opts.baselineRoot },
       observer: opts.validationObserverFor?.(vHandle)
     });

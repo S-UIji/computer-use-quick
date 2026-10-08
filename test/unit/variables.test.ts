@@ -46,3 +46,13 @@ describe("interpolateStep", () => {
     expect(interpolateStep(s, {})).toEqual(s);
   });
 });
+
+describe("变量自有键保护",()=>{
+it.each(["toString","constructor","__proto__"])("%s 原型属性不能冒充变量",name=>{
+expect(()=>interpolate("\${"+name+"}",{})).toThrow(/未定义/);
+});
+it("继承的变量也不能隐式注入",()=>{
+const vars=Object.create({TOKEN:"inherited"});
+expect(()=>interpolate("${TOKEN}",vars)).toThrow(/TOKEN/);
+});
+});

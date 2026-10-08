@@ -10,6 +10,9 @@ import { replayTrace, pageClosedRecord } from "./replay.js";
 import { archiveRun } from "../report/archive.js";
 import type { AuthState } from "../session/auth.js";
 import { applyAuth } from "../session/auth.js";
+import { inspectVariables, MissingVariablesError } from "../executor/variables.js";
+
+type PreparedTrace = PromiseSettledResult<Awaited<ReturnType<typeof loadTraceSnapshot>>>;
 
 export const DEFAULT_CONCURRENCY = 3;
 export const MAX_CONCURRENCY = 8;
@@ -42,7 +45,7 @@ export interface SuiteTraceResult {
   record?: RunRecord;
   /** 与 record 实际运行的原始文件绑定的 SHA256。 */
   traceFingerprint?: string;
-  /** 尝试次数（1 = 未重试；2 = 重试过） */
+  /** 尝试次数（0 = 预检未执行；1 = 未重试；2 = 重试过） */
   attempts: number;
   /** 首次失败、重试通过——抖动而非真挂 */
   flaky?: boolean;
@@ -64,6 +67,8 @@ export interface SuiteResult {
   /** 墙钟耗时：从编排开始到全部结束 */
   durationMs: number;
   results: SuiteTraceResult[];
+  preflightFailed?: boolean;
+  environmentUsed?: string[];
 }
 
 export interface RunSuiteOptions {
@@ -71,6 +76,7 @@ export interface RunSuiteOptions {
   paths: string[];
   vars: Record<string, string>;
   concurrency: number;
+  environmentNames?: ReadonlySet<string>;
   slowMoMs?: number;
   resolveRetryMs?: number;
   /** 归档根目录（默认 ./traces/runs；测试指向临时目录） */
@@ -91,14 +97,16 @@ export interface RunSuiteOptions {
 async function attemptOnce(
   opts: RunSuiteOptions,
   path: string,
-  suffix: string
+  suffix: string,
+  prepared: PreparedTrace
 ): Promise<SuiteTraceResult> {
   const t0 = Date.now();
   let resource: Awaited<ReturnType<BrowserSession["newIsolatedPage"]>> | undefined;
   let trace: Trace | undefined;
   let traceFingerprint: string | undefined;
   try {
-    const snapshot = await loadTraceSnapshot(path);
+    if (prepared.status === "rejected") throw prepared.reason;
+    const snapshot = prepared.value;
     trace = snapshot.trace;
     traceFingerprint = snapshot.fingerprint;
     resource = await opts.session.newIsolatedPage();
@@ -107,7 +115,7 @@ async function attemptOnce(
     const collector = await DiagnosticsCollector.attach(handle);
     if (opts.auth) await applyAuth(handle, opts.auth);
     const rec = await replayTrace({
-      handle, tracker, collector, trace, vars: opts.vars,
+      handle, tracker, collector, trace, vars: opts.vars, environmentNames: opts.environmentNames,
       slowMoMs: opts.slowMoMs, resolveRetryMs: opts.resolveRetryMs,
       visual: {
         traceName: trace.name,
@@ -161,18 +169,18 @@ async function attemptOnce(
 const isInterrupted = (r: SuiteTraceResult): boolean => r.record?.failure?.kind === "user-interrupted";
 
 /** 单条运行：失败则用全新 Context 完整重跑 1 次，以最终结果为准；被用户打断不重试 */
-async function runOne(opts: RunSuiteOptions, path: string): Promise<SuiteTraceResult> {
+async function runOne(opts: RunSuiteOptions, path: string, prepared: PreparedTrace): Promise<SuiteTraceResult> {
   const done = (r: SuiteTraceResult): SuiteTraceResult => {
     opts.onTraceEvent?.({ kind: "done", result: r });
     return r;
   };
-  const first = await attemptOnce(opts, path, "");
+  const first = await attemptOnce(opts, path, "", prepared);
   if (first.ok) return done(first);
   // 用户在场才会被打断：重试大概率再被打断，如实报告即可
   if (isInterrupted(first)) return done({ ...first, interrupted: true });
   if (first.pageClosed || first.record?.failure?.kind === "page-closed") return done(first);
   opts.onTraceEvent?.({ kind: "retrying", result: first });
-  const second = await attemptOnce(opts, path, "-retry");
+  const second = await attemptOnce(opts, path, "-retry", prepared);
   return done({
     ...second,
     flaky: second.ok || undefined,
@@ -188,6 +196,27 @@ export async function runSuite(opts: RunSuiteOptions): Promise<SuiteResult> {
   if (opts.paths.length === 0) throw new Error("tracePaths 不能为空");
 
   const t0 = Date.now();
+  const prepared = await Promise.allSettled(opts.paths.map(loadTraceSnapshot));
+  const inspections = prepared.map((input) => input.status === "fulfilled"
+    ? inspectVariables(input.value.trace.steps, opts.vars, opts.environmentNames)
+    : { missing: [], environmentUsed: [] });
+  const environmentUsed = [...new Set(inspections.flatMap((item) => item.environmentUsed))].sort();
+  if (inspections.some((item) => item.missing.length > 0)) {
+    const results: SuiteTraceResult[] = prepared.map((input, index) => ({
+      path: opts.paths[index],
+      name: input.status === "fulfilled" ? input.value.trace.name : basename(opts.paths[index]),
+      ok: false, durationMs: 0, stepCount: 0, driftCount: 0, attempts: 0,
+      error: inspections[index].missing.length
+        ? new MissingVariablesError(inspections[index].missing).message
+        : input.status === "rejected"
+          ? (input.reason instanceof Error ? input.reason.message : String(input.reason))
+          : "因其他用例缺失变量，本用例未执行。"
+    }));
+    for (const result of results) opts.onTraceEvent?.({ kind: "done", result });
+    return { total: results.length, ok: 0, failed: results.length, flaky: 0,
+      durationMs: Date.now() - t0, results, preflightFailed: true,
+      ...(environmentUsed.length ? { environmentUsed } : {}) };
+  }
   const results: SuiteTraceResult[] = new Array(opts.paths.length);
   let next = 0;
 
@@ -195,7 +224,7 @@ export async function runSuite(opts: RunSuiteOptions): Promise<SuiteResult> {
     for (;;) {
       const i = next++;
       if (i >= opts.paths.length) return;
-      results[i] = await runOne(opts, opts.paths[i]);
+      results[i] = await runOne(opts, opts.paths[i], prepared[i]);
     }
   };
 
@@ -212,6 +241,7 @@ export async function runSuite(opts: RunSuiteOptions): Promise<SuiteResult> {
     failed: results.length - ok,
     flaky: results.filter((r) => r.flaky).length,
     durationMs: Date.now() - t0,
-    results
+    results,
+    ...(environmentUsed.length ? { environmentUsed } : {})
   };
 }
