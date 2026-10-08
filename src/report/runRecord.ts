@@ -1,5 +1,6 @@
 import type { RunRecord } from "../types.js";
 import { failureUrlNotice } from "../session/pageUrl.js";
+import { describeAction } from "./describeStep.js";
 import { interruptionRecovery, type RecoveryMode } from "./interruptionRecovery.js";
 
 export function renderRunRecord(rec: RunRecord, mode: RecoveryMode = "replay"): string {
@@ -18,7 +19,7 @@ export function renderRunRecord(rec: RunRecord, mode: RecoveryMode = "replay"): 
       ? `（命中第 ${s.strategyIndex + 1} 条策略）` : "";
     // 步骤告警（基线已创建/已更新、固化失败、等待打满等）在台账里显形——与 batch 响应一致
     const note = s.error ? ` ⚠ ${s.error}` : "";
-    lines.push(`${mark} ${s.index + 1}. ${s.action} — ${s.durationMs}ms ${strat}${note}`);
+    lines.push(`${mark} ${s.index + 1}. ${s.description ?? describeAction(s.action)} — ${s.durationMs}ms ${strat}${note}`);
   }
 
   if (rec.drifts.length > 0) {

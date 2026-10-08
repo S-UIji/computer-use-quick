@@ -45,6 +45,8 @@ export interface SnapshotResult {
   text: string;
   /** ref → backendNodeId 映射，仅本次快照有效 */
   refs: Map<string, number>;
+  /** 只来自节点名称，不包含 value 属性。 */
+  refLabels: Map<string, string>;
   /** 统计，用于 benchmark */
   stats: { rawNodes: number; prunedNodes: number; collapsedGroups: number };
 }
@@ -141,6 +143,7 @@ export interface RunArtifact {
 export interface StepResult {
   index: number;
   action: Step["action"];
+  description?: string;
   ok: boolean;
   durationMs: number;
   /** 命中的策略序号，仅 replay 时有值 */

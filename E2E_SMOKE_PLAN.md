@@ -214,6 +214,14 @@ node scripts/e2e-smoke.mjs
 - 最终全量：69 文件 / 567 测试全绿，326.22s。初跑基线一次敏感 URL 提示断言失败，定向复验及最终全量均通过，R8 未改。
 - 证据：`.scratch/r9-evidence/before.json`、`after.json`、`r9-mcp-after.log`、`r9-full-test.log`、`r9-privacy-complete.log`。临时浏览器及目录已清理。
 
+## R11 可读步骤说明验收（2026-10-08）
+
+- 角标、进度和台账共用中文动作与目标；ref 标签按页缓存，成功批次和自愈演示同步刷新。
+- 填写、选择、prompt 和断言期望值不入说明；未截断名称先按引用环境值脱敏再缩短，畸形辅助锚点安全回退。
+- 新旧说明测试与审查回归均先复现失败；定向 5 文件 / 30 测试通过，最终全量 71 文件 / 581 测试全绿，340.05s。
+- 两轮有头 MCP 角标、进度和保存回放均标明密码目标而不显示填写值，截图已核对；独立代码复审无 Critical/Important。
+- 证据：.scratch/r11-full-final.log、r11-review-final.log、r11-headed-final.log、r11-evidence/result.json 与截图。专属浏览器和临时资源已清理。
+
 ## 每次修复的验收门槛
 
 - 相关单元/集成测试全绿。

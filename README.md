@@ -101,7 +101,11 @@ Chrome 不在常见位置（或想用 Edge）时，用 `CUQ_CHROME_PATH` 指定�
 真实值只在执行时替换。凭证字段按 `type=password` 与定位信息里的字样（password、密码、口令、令牌等）识别；
 向凭证字段写明文时 batch 当场告警，不必等到 `save_trace` 被拒。
 
-变量来源以显式 `vars` 为优先；`PWD/HOME/USER/USERNAME/PATH/TEMP/TMP/SHELL` 等系统字段不能隐式回退，使用这些名字时必须通过 `vars` 提供。普通应用环境变量继续可用，结果仅提示引用名称；相关文本诊断会还原为变量占位符。\n\n`replay`、`replay_suite`、`heal_step` 会先检查全部支持的插值字段（value、url、expected、key、promptText）。缺变量时不导航、不输入、不创建隔离页；套件整批未执行。前置 `extract` 的输出可供后续步骤使用。\n\n**自愈**：replay 返回 `heal_required` 后，用 `snapshot`/`batch` 在失败页面上找到正确操作，
+变量来源以显式 `vars` 为优先；`PWD/HOME/USER/USERNAME/PATH/TEMP/TMP/SHELL` 等系统字段不能隐式回退，使用这些名字时必须通过 `vars` 提供。普通应用环境变量继续可用，结果仅提示引用名称；相关文本诊断会还原为变量占位符。
+
+`replay`、`replay_suite`、`heal_step` 会先检查全部支持的插值字段（value、url、expected、key、promptText）。缺变量时不导航、不输入、不创建隔离页；套件整批未执行。前置 `extract` 的输出可供后续步骤使用。
+
+**自愈**：replay 返回 `heal_required` 后，用 `snapshot`/`batch` 在失败页面上找到正确操作，
 调 `heal_step` 演示修正步——服务端捕获描述符、新标签页全量重放验证，全绿才原子写回，
 heal 历史留在 `<trace>.heal.jsonl` 供审计。只修定位类失败（找不到/歧义/超时），
 原始断言步骤拒绝自动修改：那可能是被测系统的真 bug。
@@ -236,6 +240,7 @@ node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1�
 
 连接的是有头 Chrome 时，服务端自动进入观察模式（`CUQ_WATCH=auto`，可设 `on` / `off` 覆盖）：
 
+- **可读步骤说明**：角标、进度和台账统一显示中文动作与目标，例如“点击「登录」”“填写「密码」”；填写、选择、prompt 和断言期望值不进入动作说明，旧台账回退为中文动作。
 - **只标被操作的页面**：执行中是紫色描边 + 顶部角标「🤖 computer-use-quick 正在操作 · {标签} · 第 i/N 步」；
   两次调用之间退为右下角的小胶囊「⏸ agent 待命」；检测到用户介入后保留红色描边，停止提示也位于右下角。
 - **跳转后恢复提示**：被操作页进入新主文档后，自动恢复最近的执行、待命或中断标注；截图隐藏期间暂缓恢复，移除标注或关闭页面会清理监听。

@@ -303,7 +303,7 @@ describe("MCP server（真实 stdio 协议）", () => {
     const notes = replies.filter((r) => r.method === "notifications/progress" && r.params?.progressToken === "prog-40");
     expect(notes.map((n) => n.params.progress)).toEqual([1, 2]);
     expect(notes.every((n) => n.params.total === 2)).toBe(true);
-    expect(notes[0].params.message).toBe("第 1/2 步 navigate ✓");
+    expect(notes[0].params.message).toContain("第 1/2 步 导航到");
   });
 
   it("不带 progressToken 时不推送任何进度", async () => {

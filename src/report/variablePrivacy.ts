@@ -54,7 +54,11 @@ export function redactVariableFailure(failure: FailureContext, redact: VariableR
 export function redactVariableRecord(record: RunRecord, redact: VariableRedactor): RunRecord {
   return {
     ...record,
-    steps: record.steps.map((step) => step.error === undefined ? step : { ...step, error: redact(step.error) }),
+    steps: record.steps.map((step) => ({
+      ...step,
+      ...(step.error === undefined ? {} : { error: redact(step.error) }),
+      ...(step.description === undefined ? {} : { description: redact(step.description) })
+    })),
     ...(record.failure === undefined ? {} : { failure: redactVariableFailure(record.failure, redact) })
   };
 }

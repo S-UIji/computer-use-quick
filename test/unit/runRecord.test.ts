@@ -25,7 +25,7 @@ describe("renderRunRecord", () => {
 
   it("逐步列出耗时", () => {
     const md = renderRunRecord(base);
-    expect(md).toContain("navigate");
+    expect(md).toContain("导航");
     expect(md).toContain("1200ms");
   });
 

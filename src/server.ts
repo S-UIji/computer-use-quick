@@ -31,6 +31,7 @@ import { ProgressReporter } from "./watch/progress.js";
 
 /** 最近一次 snapshot 的 ref 表，按 pageId 保存，供 batch 用 ref 指代元素 */
 export const refTables = new Map<string, Map<string, number>>();
+export const refLabelTables = new Map<string, Map<string, string>>();
 
 /** 本 session 内每个页面成功执行过的步骤（ref 已固化成 descriptor），供 save_trace 消费 */
 export const sessionSteps = new Map<string, Step[]>();
@@ -143,6 +144,7 @@ export function createServer(session: BrowserSession): McpServer {
       await DiagnosticsCollector.attach(handle);
       const snap = await takeSnapshot(handle, { expand, threshold });
       refTables.set(handle.pageId, snap.refs);
+      refLabelTables.set(handle.pageId, snap.refLabels);
       observedUrls.set(handle.pageId, handle.page.url());
 
       // 任何参数的 snapshot 都刷新 diff 基线
@@ -216,10 +218,11 @@ export function createServer(session: BrowserSession): McpServer {
       const refs = refTables.get(handle.pageId) ?? new Map<string, number>();
 
       const watch = new RunWatch({
-        handle, label: "探索", watch: session.watchEnabled, progress: ProgressReporter.from(extra)
+        handle, label: "探索", watch: session.watchEnabled, progress: ProgressReporter.from(extra),
+        refLabels: refLabelTables.get(handle.pageId)
       });
       const r = await runBatch({
-        handle, tracker, collector, refs,
+        handle, tracker, collector, refs, refLabels: refLabelTables.get(handle.pageId),
         vars: variableState.values, environmentNames: variableState.environmentNames,
         steps: steps as unknown as Step[],
         stability, resolveRetryMs,
@@ -228,6 +231,7 @@ export function createServer(session: BrowserSession): McpServer {
       redact = createVariableRedactor(variableState.values, variableCheck.environmentUsed, r.variableRedactions);
       refTables.set(handle.pageId, refs);
       recordSteps(handle.pageId, r.capturedSteps);
+      if (r.refLabels) refLabelTables.set(handle.pageId, r.refLabels);
       // 成功与步骤失败都已把现场返回给调用方，以批次终态作为下一次比较基线。
       observedUrls.set(handle.pageId, handle.page.url());
 
@@ -572,14 +576,17 @@ export function createServer(session: BrowserSession): McpServer {
           const collector = await DiagnosticsCollector.attach(handle);
           const tracker = await NetworkTracker.attach(handle);
           const refs = refTables.get(handle.pageId) ?? new Map<string, number>();
+          const refLabels = refLabelTables.get(handle.pageId) ?? new Map<string, string>();
           outcome = await runHeal({
-            ...common, handle, tracker, collector, refs, stepIndex: k!, demoSteps,
+            ...common, handle, tracker, collector, refs, refLabels, stepIndex: k!, demoSteps,
             demoObserver: new RunWatch({
               handle, label: `自愈演示 · 第 ${k! + 1} 步`, watch: session.watchEnabled,
+              refLabels,
               progress, progressPrefix: "演示修正步 ", progressTotal: healTotal
             })
           });
           refTables.set(handle.pageId, refs);
+          refLabelTables.set(handle.pageId, refLabels);
         }
         if (outcome.status === "rejected") return fail(notice + outcome.reason);
         if (outcome.status === "demo-failed") return fail(notice + renderDemoFailure(outcome.failure));

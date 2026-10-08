@@ -101,6 +101,7 @@ export interface RunHealOptions {
   collector: DiagnosticsCollector;
   /** 演示动作里 ref → backendNodeId 的映射（来自模型最近一次 snapshot） */
   refs: Map<string, number>;
+  refLabels?: Map<string, string>;
   tracePath: string;
   trace: Trace;
   expectedFingerprint?: string;
@@ -151,11 +152,15 @@ export async function runHeal(opts: RunHealOptions): Promise<PlannedHealOutcome>
   const expectedFingerprint = opts.expectedFingerprint ?? (await loadTraceSnapshot(opts.tracePath)).fingerprint;
   const demo = await runBatch({
     handle: opts.handle, tracker: opts.tracker, collector: opts.collector,
-    refs: opts.refs, vars: opts.vars, steps: opts.demoSteps, environmentNames: opts.environmentNames,
+    refs: opts.refs, refLabels: opts.refLabels, vars: opts.vars, steps: opts.demoSteps, environmentNames: opts.environmentNames,
     captureDescriptors: true, observer: opts.demoObserver
   });
   if (!demo.ok) {
     return { status: "demo-failed", stepIndex: opts.stepIndex, failure: redactVariableFailure(demo.failure!, createVariableRedactor(opts.vars, demoOrigins, demo.variableRedactions)) };
+  }
+  if (demo.refLabels && opts.refLabels) {
+    opts.refLabels.clear();
+    for (const [ref, label] of demo.refLabels) opts.refLabels.set(ref, label);
   }
   if (!demo.capturedSteps.length || demo.capturedSteps.length !== opts.demoSteps.length) {
     return { status: "rejected", reason: "演示步骤捕获不完整，无法安全生成修复；trace 未写回、未计自愈次数，请重新 snapshot 并演示。" };

@@ -25,7 +25,7 @@ export interface RunOutcome {
  */
 export interface StepObserver {
   onRunStart(total: number): Promise<void>;
-  onStepStart(index: number, step: Step): Promise<void>;
+  onStepStart(index: number, step: Step, description?: string): Promise<void>;
   onStepEnd(result: StepResult): Promise<void>;
   onRunEnd(outcome: RunOutcome): Promise<void>;
   /** 取出自上次调用以来检测到的用户介入（取出即清空） */

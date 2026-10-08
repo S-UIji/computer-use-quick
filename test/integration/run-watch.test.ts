@@ -62,7 +62,7 @@ describe("RunWatch（观察模式组装）", () => {
       { action: "wait", until: { type: "visible", target: css("#late") }, timeout: 8000 }
     ], new RunWatch({ handle, label: "探索", watch: true }));
 
-    expect(await pollBadge("第 2/2 步 wait")).toContain("探索");
+    expect(await pollBadge("第 2/2 步 等待")).toContain("探索");
     expect(await evalValue<string>(`window.__cuqOverlay.wrap.getAttribute("data-state")`)).toBe("active");
     expect((await p).ok).toBe(true);
     expect(await evalValue<string>(`window.__cuqOverlay.badge.textContent`)).toBe(renderBadgeText({ kind: "idle" }));
@@ -75,7 +75,7 @@ describe("RunWatch（观察模式组装）", () => {
       { action: "fill", target: css("#name"), value: "不该被填" }
     ], new RunWatch({ handle, label: "探索", watch: true }));
 
-    await pollBadge("第 2/3 步 wait");
+    await pollBadge("第 2/3 步 等待");
     await rawClick(300, 400);
     const r = await p;
     expect(r.ok).toBe(false);
@@ -144,9 +144,13 @@ describe("RunWatch（观察模式组装）", () => {
       { action: "fill", target: css("#user"), value: "x" }
     ], new RunWatch({ handle, label: "探索", watch: false, progress, progressPrefix: "demo · " }));
 
-    expect(sendNotification.mock.calls.map((c) => c[0].params)).toEqual([
-      { progressToken: "t1", progress: 1, total: 2, message: "demo · 第 1/2 步 navigate ✓" },
-      { progressToken: "t1", progress: 2, total: 2, message: "demo · 第 2/2 步 fill ✓" }
+    const params = sendNotification.mock.calls.map((c) => c[0].params);
+    expect(params.map(({ progressToken, progress, total }) => ({ progressToken, progress, total }))).toEqual([
+      { progressToken: "t1", progress: 1, total: 2 },
+      { progressToken: "t1", progress: 2, total: 2 }
     ]);
+    expect(params[0].message).toContain("导航到");
+    expect(params[0].message).toContain("/form.html");
+    expect(params[1].message).toContain("填写「#user」");
   });
 });

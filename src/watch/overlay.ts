@@ -1,7 +1,7 @@
 import type { PageHandle } from "../session/browser.js";
 
 export type OverlayState =
-  | { kind: "active"; label: string; step: number; total: number; action: string }
+  | { kind: "active"; label: string; step: number; total: number; action: string; description?: string }
   | { kind: "idle" }
   | { kind: "interrupted"; stopStep: number };
 
@@ -9,7 +9,7 @@ export type OverlayState =
 export function renderBadgeText(s: OverlayState): string {
   switch (s.kind) {
     case "active":
-      return `🤖 computer-use-quick 正在操作 · ${s.label} · 第 ${s.step}/${s.total} 步 ${s.action} · 请勿操作页面`;
+      return `🤖 computer-use-quick 正在操作 · ${s.label} · 第 ${s.step}/${s.total} 步 ${s.description ?? s.action} · 请勿操作页面`;
     case "idle":
       return "⏸ agent 待命";
     case "interrupted":

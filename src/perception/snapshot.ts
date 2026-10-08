@@ -19,11 +19,18 @@ export async function takeSnapshot(
   const mainFrameId = frames[0]?.frameId;
 
   let rawTotal = 0;
+  // 显示树会裁剪长名称；观察说明保留原名，以便先完整脱敏再截断。
+  const rawNames = new Map<number, string>();
   const merged: PrunedNode = { role: "RootWebArea", name: "", props: {}, children: [] };
 
   for (const f of frames) {
     const raw = await fetchAxTree(handle.cdp, f.frameId);
     rawTotal += raw.length;
+    for (const node of raw) {
+      if (node.backendDOMNodeId !== undefined && typeof node.name?.value === "string") {
+        rawNames.set(node.backendDOMNodeId, node.name.value.trim());
+      }
+    }
 
     const root = buildTree(raw);
     if (!root) continue;
@@ -42,7 +49,11 @@ export async function takeSnapshot(
 
   // 空白页（about:blank、尚未导航）是合法状态，不是错误——返回空快照即可
   const collapsed = collapse(merged, { threshold: opts.threshold, expand: opts.expand });
-  const { text, refs } = render(collapsed);
+  const { text, refs, refLabels } = render(collapsed);
+  for (const [ref, backendId] of refs) {
+    const name = rawNames.get(backendId);
+    if (name) refLabels.set(ref, name);
+  }
 
   let prunedCount = 0;
   let groupCount = 0;
@@ -57,6 +68,7 @@ export async function takeSnapshot(
   return {
     text,
     refs,
+    refLabels,
     stats: { rawNodes: rawTotal, prunedNodes: prunedCount, collapsedGroups: groupCount }
   };
 }

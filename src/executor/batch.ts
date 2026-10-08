@@ -7,8 +7,10 @@ import type { FailureContext, FailureKind, RunArtifact, Step, StepResult, Visual
 import { describeInterruption, type StepObserver } from "./observer.js";
 import { runAction, type ActionContext } from "./actions.js";
 import type { StabilityOptions } from "../waiter/stability.js";
+import { createVariableRedactor } from "../report/variablePrivacy.js";
+import { describeStep, describeAction } from "../report/describeStep.js";
 import { runAssert, AssertionFailure } from "../assertion/assert.js";
-import { interpolateStep, variableFieldMappings, type VariableTextMapping } from "./variables.js";
+import { interpolateStep, inspectVariables, variableFieldMappings, type VariableTextMapping } from "./variables.js";
 import { LocatorError } from "../locator/resolve.js";
 import { takeSnapshot } from "../perception/snapshot.js";
 import { buildDescriptor } from "../locator/descriptor.js";
@@ -22,6 +24,7 @@ export interface BatchOptions {
   refs: Map<string, number>;
   vars: Record<string, string>;
   environmentNames?: ReadonlySet<string>;
+  refLabels?: ReadonlyMap<string, string>;
   steps: Step[];
   /** 成功执行后是否把 {ref} 固化成 {descriptor}，供 save_trace 使用。replay 时传 false。 */
   captureDescriptors?: boolean;
@@ -44,6 +47,7 @@ export interface BatchResult {
   capturedSteps: Step[];
   /** 仅供诊断脱敏的运行时字段映射，不写入 trace。 */
   variableRedactions?: VariableTextMapping[];
+  refLabels?: Map<string, string>;
   /** 失败现场产物（视觉断言三图等），随结果上交归档 */
   artifacts: RunArtifact[];
   failure?: FailureContext;
@@ -147,6 +151,7 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
   const capturedSteps: Step[] = [];
   const variableRedactions: VariableTextMapping[] = [];
   const activeEnvironment = new Set(opts.environmentNames);
+  const descriptionOrigins = inspectVariables(opts.steps, opts.vars, opts.environmentNames).environmentUsed;
   const fail = (failure: FailureContext): BatchResult => ({
     ok: false, results, vars: ctx.vars, snapshot: failure.snapshot,
     capturedSteps, artifacts: ctx.artifacts ?? [], failure,
@@ -157,16 +162,18 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
 
   for (let i = 0; i < opts.steps.length; i++) {
     const raw = opts.steps[i];
+    let description = describeAction(raw.action);
     const t0 = Date.now();
     const notes: string[] = [];
     ctx.onResolved = undefined;
     ctx.lastWaitTimedOut = undefined;
-    await obs?.onStepStart(i, raw);
 
     try {
       assertPageOpen(opts.handle);
       const step = interpolateStep(raw, ctx.vars);
       variableRedactions.push(...variableFieldMappings(raw, step, activeEnvironment));
+      description = describeStep(raw, opts.refLabels, createVariableRedactor(opts.vars, descriptionOrigins, variableRedactions));
+      await obs?.onStepStart(i, raw, description);
       dialogs?.setStep(step);
       // ref 是单次快照内的短期句柄，不能进 trace，要固化成长期 descriptor。
       // 固化的时机必须早于动作本身：动作一旦触发导航或打开新标签，原元素就失效了，
@@ -254,6 +261,7 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
       const result: StepResult = {
         index: i,
         action: raw.action,
+        description,
         ok: true,
         durationMs: Date.now() - t0,
         strategyIndex: ctx.lastResolve?.strategyIndex,
@@ -290,7 +298,8 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
       const dialogNotes = (dialogs?.takeHandled() ?? []).map(describeDialog);
       const message = dialogNotes.length ? `${baseMessage}（本步期间${dialogNotes.join("；")}）` : baseMessage;
       const result: StepResult = {
-        index: i, action: raw.action, ok: false, durationMs: Date.now() - t0, error: message
+        index: i, action: raw.action,
+        description, ok: false, durationMs: Date.now() - t0, error: message
       };
       results.push(result);
       await obs?.onStepEnd(result);
@@ -326,6 +335,6 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
   if (late.length && last) last.error = [last.error, ...late].filter(Boolean).join("；");
 
   await obs?.onRunEnd({ ok: true, interrupted: false });
-  return { ok: true, results, vars: ctx.vars, snapshot: final.text, capturedSteps, artifacts: ctx.artifacts ?? [],
+  return { ok: true, results, vars: ctx.vars, snapshot: final.text, capturedSteps, artifacts: ctx.artifacts ?? [], refLabels: final.refLabels,
     ...(variableRedactions.length ? { variableRedactions } : {}) };
 }

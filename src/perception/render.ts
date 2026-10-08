@@ -1,8 +1,9 @@
 import type { PrunedNode, SnapshotNode } from "../types.js";
 import { isCollapsedGroup } from "../types.js";
 
-export function render(root: PrunedNode): { text: string; refs: Map<string, number> } {
+export function render(root: PrunedNode): { text: string; refs: Map<string, number>; refLabels: Map<string, string> } {
   const refs = new Map<string, number>();
+  const refLabels = new Map<string, string>();
   const lines: string[] = [];
   let counter = 0;
 
@@ -27,6 +28,7 @@ export function render(root: PrunedNode): { text: string; refs: Map<string, numb
     if (node.backendNodeId !== undefined) {
       const ref = `e${++counter}`;
       refs.set(ref, node.backendNodeId);
+      refLabels.set(ref, node.name || node.role);
       prefix = `[${ref}] `;
     }
     lines.push(
@@ -38,5 +40,5 @@ export function render(root: PrunedNode): { text: string; refs: Map<string, numb
   // 根节点自身不渲染成一行，直接渲染其子树
   for (const c of root.children) emit(c, 0);
 
-  return { text: lines.join("\n"), refs };
+  return { text: lines.join("\n"), refs, refLabels };
 }
