@@ -5,7 +5,7 @@ import { NetworkTracker } from "../waiter/stability.js";
 import { DiagnosticsCollector } from "../diagnostics/collector.js";
 import type { RunRecord, Trace } from "../types.js";
 import { PageClosedError } from "../session/pageErrors.js";
-import { loadTrace } from "./store.js";
+import { loadTraceSnapshot } from "./store.js";
 import { replayTrace, pageClosedRecord } from "./replay.js";
 import { archiveRun } from "../report/archive.js";
 import type { AuthState } from "../session/auth.js";
@@ -40,6 +40,8 @@ export interface SuiteTraceResult {
   error?: string;
   /** 完整 run-record（成功与失败都带；server 逐 trace 记账用，失败上下文接 heal_step） */
   record?: RunRecord;
+  /** 与 record 实际运行的原始文件绑定的 SHA256。 */
+  traceFingerprint?: string;
   /** 尝试次数（1 = 未重试；2 = 重试过） */
   attempts: number;
   /** 首次失败、重试通过——抖动而非真挂 */
@@ -94,8 +96,11 @@ async function attemptOnce(
   const t0 = Date.now();
   let resource: Awaited<ReturnType<BrowserSession["newIsolatedPage"]>> | undefined;
   let trace: Trace | undefined;
+  let traceFingerprint: string | undefined;
   try {
-    trace = await loadTrace(path);
+    const snapshot = await loadTraceSnapshot(path);
+    trace = snapshot.trace;
+    traceFingerprint = snapshot.fingerprint;
     resource = await opts.session.newIsolatedPage();
     const { handle } = resource;
     const tracker = await NetworkTracker.attach(handle);
@@ -127,7 +132,7 @@ async function attemptOnce(
       path, name: trace.name, ok: rec.ok, durationMs: Date.now() - t0,
       stepCount: rec.steps.length, driftCount: rec.drifts.length,
       // record 始终带上：server 要逐 trace 记账（suite→heal 闭环），ok 的 record 也有消费价值
-      record: rec,
+      record: rec, traceFingerprint,
       attempts: suffix ? 2 : 1
     };
   } catch (err) {
@@ -137,7 +142,7 @@ async function attemptOnce(
       await archiveRun({ traceName: trace.name, record, trace, rootDir: opts.runsDir, suffix });
       return {
         path, name: trace.name, ok: false, durationMs: Date.now() - t0,
-        stepCount: 0, driftCount: 0, record, pageClosed: true, attempts: suffix ? 2 : 1
+        stepCount: 0, driftCount: 0, record, traceFingerprint, pageClosed: true, attempts: suffix ? 2 : 1
       };
     }
     // 未预期异常兜底为单条失败：trace 读不出/Context 创建失败等，

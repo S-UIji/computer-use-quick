@@ -203,12 +203,14 @@ export interface HealSidecarRecord {
   stepIndex: number;
   originalStep: Step;
   replacementSteps: Step[];
+  /** 全部修复点；旧记录可能没有此字段。顶层字段保留第一处修复供旧读者使用。 */
+  repairs?: Array<{ stepIndex: number; originalStep: Step; replacementSteps: Step[] }>;
   validation: { ok: boolean; durationMs: number; driftCount: number };
 }
 
 /** 自愈预算：进程内权威，replay 全绿时由 server 清零 */
 export interface HealBudget {
-  /** 每步已消耗的验证次数（验证失败 +1） */
+  /** 每个原始点自身替换块的失败验证次数 */
   perStep: Map<number, number>;
   /** 本轮修复周期内累计消耗的验证次数 */
   total: number;

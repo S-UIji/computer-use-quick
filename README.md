@@ -63,7 +63,7 @@ Chrome 不在常见位置（或想用 Edge）时，用 `CUQ_CHROME_PATH` 指定�
 | `replay` | 跑已有用例。CI 回归用这个，全程不调模型 |
 | `replay_suite` | 并行回放多条 trace：每条独立 BrowserContext（零共享 cookie），失败自动完整重试 1 次（flaky 标记），跑完全部再汇总；失败上下文可直接接 `heal_step`。`concurrency` 默认 3、上限 8 |
 | `save_auth` | 把当前页面登录态（cookie + localStorage）存为认证态文件并设为 session 默认，replay/suite/heal 验证门自动注入——用例不必每次从头登录 |
-| `heal_step` | 回放失败后的自愈：演示修正步 → 独立 Context 全量重放验证 → 全绿才写回 trace。`assert-failed` 服务端拒修（可能是真 bug） |
+| `heal_step` | 单点演示修正步，或 `repairs` 同时提交多处修复 → 独立 Context 全量验证 → 全绿才写回。原始断言拒修；`dryRun` 不写回、不改变预算 |
 | `inspect` | 只在排查失败时用。取截图/console/网络 |
 
 ## 标签页选择与关闭恢复
@@ -104,8 +104,42 @@ Chrome 不在常见位置（或想用 Edge）时，用 `CUQ_CHROME_PATH` 指定�
 **自愈**：replay 返回 `heal_required` 后，用 `snapshot`/`batch` 在失败页面上找到正确操作，
 调 `heal_step` 演示修正步——服务端捕获描述符、新标签页全量重放验证，全绿才原子写回，
 heal 历史留在 `<trace>.heal.jsonl` 供审计。只修定位类失败（找不到/歧义/超时），
-断言失败会被拒绝：那可能是被测系统的真 bug。同一步最多 2 次尝试、一轮最多 3 处，
-超出转人工。
+原始断言步骤拒绝自动修改：那可能是被测系统的真 bug。
+
+同一条用例存在多个故障时，先提交第一处修复。若验证暴露后续原步骤故障，返回结果会标明
+原始步号、候选步号和各修复点的 `passed` / `failed` / `not-reached`，并给出可复用的
+`repairs` JSON。把后续已确认故障的修复加入其中，再一次提交：
+
+```json
+{
+  "tracePath": "traces/example.json",
+  "repairs": [
+    {"stepIndex": 1, "steps": [
+      {"action": "click", "target": {"descriptor": {
+        "strategies": [{"kind": "test-id", "value": "open-details"}], "framePath": []
+      }}}
+    ]},
+    {"stepIndex": 4, "steps": [
+      {"action": "click", "target": {"descriptor": {
+        "strategies": [{"kind": "test-id", "value": "confirm"}], "framePath": []
+      }}}
+    ]}
+  ]
+}
+```
+
+步号始终是**原文件的 0-based 索引**，不会因前一处替换成多步而变化。每次 1–3 处，每处
+1–3 步；`repairs`、`actions`、`step` 三选一，`repairs` 不能搭配顶层 `stepIndex`。
+多点模式直接隔离验证，所有目标必须用稳定 descriptor（包括 `wait.until.target`），不能用 ref。
+每处都需要同一文件版本的可修失败证据；编辑文件后必须重新 replay。
+
+仅修复块自身验证失败才扣该原始点一次、周期总数一次：每点上限 2 次、周期上限 3 次。
+后续未替换原步骤失败、演示失败、页面关闭、用户打断及 dry-run 均不扣次数；
+dry-run 成功也不清预算或失败记录。正式写回或真实 replay 全绿才清零。
+全量验证失败时原文件与审计不变；验证期间原文件被编辑也会拒绝覆盖。
+成功多点修复只写回一次、追加一条含完整 `repairs` 的审计，顶层旧字段保留第一处摘要。
+同一文件的并发自愈会明确返回忙，请等前次完成后重试。若 trace 已写回但审计追加失败，
+返回会明确告警；trace 与 sidecar 不构成跨文件原子事务。
 
 **视觉断言**：`assert` 支持 `type: "screenshot-match"`——元素区域（或 `fullPage: true`
 整页）截图与基线逐像素比对，差异超阈值即失败（归为 `assert-failed`，heal 拒修）。
@@ -194,7 +228,7 @@ node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1�
 流水线 grep 它拿退出依据。每次运行的 run-record 落盘 `traces/runs/<时间戳>-<用例名>/`
 （gitignored），失败附现场包（截图 + 快照 + trace 副本）；认证态用 `save_auth`
 捕获一次后自动注入，用例不必每条都登录。自愈有服务端护栏：只修定位类失败、单步≤2 次、
-一轮≤3 处、断言失败拒修（转人工），全自动写回前必过独立 Context 验证门。
+每周期≤3 次失败修复验证、原始断言拒修（转人工），全自动写回前必过独立 Context 验证门。
 
 本地要跑可重复的二期闭环冒烟：`node scripts/e2e-smoke.mjs`。它自带随机端口的临时 SUT，连续两轮验证 `replay_suite → heal_step → replay_suite`；运行前先 `node scripts/ci-harness.mjs up`，结束后 `node scripts/ci-harness.mjs down`。
 

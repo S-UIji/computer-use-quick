@@ -5,18 +5,20 @@ import { dirname } from "node:path";
 import type { BrowserSession, PageHandle } from "./session/browser.js";
 import { DialogGuard, describeDialog } from "./session/dialogs.js";
 import { failureUrlNotice, pageChangeNotice } from "./session/pageUrl.js";
-import type { RunRecord, Step } from "./types.js";
+import type { RunRecord, Step, FailureKind } from "./types.js";
 import { takeSnapshot } from "./perception/snapshot.js";
 import { diffLines, renderDiff } from "./perception/diff.js";
 import { DiagnosticsCollector } from "./diagnostics/collector.js";
 import { NetworkTracker } from "./waiter/stability.js";
 import { runBatch } from "./executor/batch.js";
-import { saveTrace, loadTrace } from "./trace/store.js";
+import { saveTrace, loadTraceSnapshot, canonicalTracePath } from "./trace/store.js";
 import { replayTrace } from "./trace/replay.js";
 import {
-  checkHealGate, runHeal, renderDemoFailure, validationCountsAgainstBudget, type HealBudget
+  checkHealGate, runHeal, runMultiHeal, renderDemoFailure, validationCountsAgainstBudget,
+  HEALABLE_KINDS, MAX_HEALS_PER_TRACE, type HealBudget
 } from "./trace/heal.js";
 import { checkConcurrency, runSuite } from "./trace/suite.js";
+import { buildRepairPlan, assessRepairs, repairFailureLocation, type TraceRepair } from "./trace/repairPlan.js";
 import { archiveRun } from "./report/archive.js";
 import { renderSuiteResult, renderTraceEvent } from "./report/suiteReport.js";
 import { renderRunRecord } from "./report/runRecord.js";
@@ -100,6 +102,22 @@ export function createServer(session: BrowserSession): McpServer {
   const server = new McpServer({ name: "computer-use-quick", version: "0.1.0" });
   // 只在本服务实例内保存原始 URL，避免不同会话的观察基线串扰。
   const observedUrls = new Map<string, string>();
+  const healingTraces = new Set<string>();
+  const healEvidence = new Map<string, { fingerprint: string; failures: Map<number, FailureKind> }>();
+  const rememberRun = (path: string, fingerprint: string, record: RunRecord): void => {
+    lastRunByTrace.set(path, record);
+    if (record.ok) {
+      healBudgets.delete(path);
+      healEvidence.delete(path);
+      return;
+    }
+    const previous = healEvidence.get(path);
+    if (previous && previous.fingerprint !== fingerprint) healBudgets.delete(path);
+    const evidence = previous?.fingerprint === fingerprint
+      ? previous : { fingerprint, failures: new Map<number, FailureKind>() };
+    if (record.failure) evidence.failures.set(record.failure.failedIndex, record.failure.kind);
+    healEvidence.set(path, evidence);
+  };
 
   server.registerTool(
     "snapshot",
@@ -343,7 +361,8 @@ export function createServer(session: BrowserSession): McpServer {
       // 认证态注入抢在 replay 的 navigate 之前——localStorage 播种随新文档生效
       if (authState) await applyAuth(handle, authState);
 
-      const trace = await loadTrace(tracePath);
+      tracePath = await canonicalTracePath(tracePath);
+      const { trace, fingerprint } = await loadTraceSnapshot(tracePath);
       const watch = new RunWatch({
         handle, label: trace.name, watch: session.watchEnabled,
         progress: ProgressReporter.from(extra), progressPrefix: `${trace.name} · `
@@ -355,8 +374,7 @@ export function createServer(session: BrowserSession): McpServer {
         observer: watch
       });
       // 全绿 = 新一轮修复周期开始，自愈预算清零；失败则记下，供 heal_step 消费
-      lastRunByTrace.set(tracePath, rec);
-      if (rec.ok) healBudgets.delete(tracePath);
+      rememberRun(tracePath, fingerprint, rec);
 
       // 归档：run-record 总是落盘；失败附现场包（截图 + 快照 + trace 副本）
       let screenshot: string | undefined;
@@ -404,7 +422,7 @@ export function createServer(session: BrowserSession): McpServer {
       const progress = ProgressReporter.from(extra);
       let doneCount = 0;
       const result = await runSuite({
-        session, paths: tracePaths,
+        session, paths: await Promise.all(tracePaths.map(canonicalTracePath)),
         vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
         concurrency: gate.value, slowMoMs, resolveRetryMs,
         auth: authState,
@@ -419,8 +437,7 @@ export function createServer(session: BrowserSession): McpServer {
       // 逐 trace 记账：suite 的结果对 heal_step 直接可见，语义等价于各跑过一次单条 replay。
       // 成功 trace 同时清自愈预算——全绿即开启新一轮修复周期
       for (const t of result.results) {
-        if (t.record) lastRunByTrace.set(t.path, t.record);
-        if (t.ok) healBudgets.delete(t.path);
+        if (t.record && t.traceFingerprint) rememberRun(t.path, t.traceFingerprint, t.record);
       }
       return { content: [{ type: "text" as const, text: notices(session) + renderSuiteResult(result) }] };
     }
@@ -430,125 +447,167 @@ export function createServer(session: BrowserSession): McpServer {
     "heal_step",
     {
       description:
-        "修复一条 replay 失败的 trace：先 replay 拿到失败上下文，用 snapshot/batch 在失败页面上" +
-        "找到正确操作，再把修正步作为 actions 传给本工具。服务端捕获定位描述符后，会在新标签页" +
-        "全量重放整条 trace 做验证——全绿才写回，修好即永久生效（也可 dryRun 只验证不写回）。\n" +
-        "修什么：只修「定位找不到/歧义/超时」（target-not-found/ambiguous/timeout）；assert-failed 一律拒绝" +
-        "——断言失败可能是被测系统真 bug，自动改期望等于掩盖缺陷。\n" +
-        "怎么修：actions 里用当前快照的 ref 演示修正步（1~3 步，替换失败的那 1 步）；元素只在瞬态出现、" +
-        "演示不了时改用 step 传手写完整步骤 JSON。二者只能给一个。\n" +
-        "预算：同一步最多 2 次尝试，一轮最多 3 处；超出请转人工。验证不通过会返回新的失败上下文，可继续修。\n" +
-        "提示：一次 heal 只替换失败的那一步。要修多步就循环 replay → heal_step。",
+        "修复 replay 失败的 trace：actions/step 单点演示捕获 descriptor，或 repairs 一次提交多处稳定步骤。" +
+        "独立 Context 全量重放全绿才原子写回；dryRun 只验证，不写回、不消耗或清除预算。\n" +
+        "只修有同一原文件失败证据的定位找不到/歧义/超时；原始 assert 与 assert-failed 均拒修。" +
+        "候选暴露后续原步骤故障时会保留新证据，并返回可继续合并的 repairs。\n" +
+        "actions/step/repairs 三选一。repairs 每项 stepIndex 是原文件的 0-based 步号，" +
+        "每次 1~3 处、每处 1~3 steps，需要目标时必须用 descriptor（含 wait.until.target），禁止 ref。" +
+        "repairs 与顶层 stepIndex 互斥。actions 可用当前 snapshot 的 ref 演示。\n" +
+        "预算：同一原始点最多 2 次、周期最多 3 次失败修复验证；只计实际失败的替换块，" +
+        "已通过修复不为后续原步骤失败扣次数。页面关闭、用户打断和演示失败不计。",
       inputSchema: {
         tracePath: z.string().describe("trace 文件路径，与 replay 相同"),
         actions: z.array(z.record(z.any())).min(1).max(3).optional()
-          .describe("修正步数组（主形态）：在失败页面上演示的 1~3 步，target 用 snapshot 返回的 ref"),
-        step: z.record(z.any()).optional()
-          .describe("手写完整步骤 JSON（逃生舱）：含 strategies 数组，用于演示不了的瞬态元素"),
+          .describe("单点演示的 1~3 步，target 可用 snapshot 返回的 ref"),
+        step: z.record(z.any()).optional().describe("单点手写完整步骤，目标用稳定 descriptor"),
         stepIndex: z.number().int().min(0).optional()
-          .describe("要修复的 0-based 步号；省略则用该 trace 最近一次 replay 的失败步"),
-        dryRun: z.boolean().optional()
-          .describe("true 时只验证不写回（不落盘、不记 heal 历史、不耗预算），默认 false"),
-        pageId: z.string().optional().describe("演示执行的页面，省略则用当前选中页"),
-        auth: z.string().optional()
-          .describe("认证态文件路径；省略则用 save_auth 设置的 session 默认"),
+          .describe("单点修复的原文件 0-based 步号；省略用最近 replay 失败步"),
+        repairs: z.array(z.object({
+          stepIndex: z.number().int().min(0),
+          steps: z.array(z.record(z.any())).min(1).max(3)
+        }).strict()).min(1).max(3).optional()
+          .describe("同时替换原文件的 1~3 处步骤；所有目标必须为稳定 descriptor，禁止 ref"),
+        dryRun: z.boolean().optional().describe("只验证，不写回、不追加审计、不消耗或清除预算"),
+        pageId: z.string().optional().describe("仅用于 actions/step 的演示页；repairs 使用独立验证页"),
+        auth: z.string().optional().describe("认证态路径；省略用 session 默认"),
         vars: z.record(z.string()).optional().describe("变量表，供 ${VAR} 插值；凭证从这里传")
       }
     },
-    async ({ tracePath, actions, step, stepIndex, dryRun, pageId, auth, vars }, extra) => {
-      const hasActions = actions !== undefined;
-      const hasStep = step !== undefined;
-      if (hasActions === hasStep) {
-        return { isError: true, content: [{ type: "text" as const,
-          text: "actions 与 step 必须且只能提供一个：actions 传演示步数组，step 传手写完整步骤 JSON。" }] };
-      }
-
-      const trace = await loadTrace(tracePath);
-      const lastRun = lastRunByTrace.get(tracePath);
-
-      // stepIndex 缺省取最近一次 replay 的失败步；没有失败记录就拒绝猜测
-      const k = stepIndex ?? lastRun?.failure?.failedIndex;
-      if (k === undefined) {
-        return { isError: true, content: [{ type: "text" as const,
-          text: "该 trace 没有待修复的失败记录。请先 replay 让它失败一次，或显式传 stepIndex。" }] };
-      }
-      if (k >= trace.steps.length) {
-        return { isError: true, content: [{ type: "text" as const,
-          text: `stepIndex ${k} 超出范围：trace 只有 ${trace.steps.length} 步（0-based）。` }] };
-      }
-
-      const budget = healBudgets.get(tracePath) ?? { perStep: new Map<number, number>(), total: 0 };
-      const gate = checkHealGate({ lastFailureKind: lastRun?.failure?.kind, budget, stepIndex: k });
-      if (!gate.ok) {
-        return { isError: true, content: [{ type: "text" as const, text: gate.reason }] };
-      }
-
-      const handle = await session.getPage(pageId);
-      const notice = notices(session, handle);
-      const collector = await DiagnosticsCollector.attach(handle);
-      const tracker = await NetworkTracker.attach(handle);
-      const refs = refTables.get(handle.pageId) ?? new Map<string, number>();
-
-      const { auth: authState, error: authError } = await resolveAuth(auth);
-      if (authError) {
-        return { isError: true, content: [{ type: "text" as const, text: notice + authError }] };
-      }
-
-      const demoSteps = (hasActions ? actions! : [step!]) as unknown as Step[];
-      const progress = ProgressReporter.from(extra);
-      // 两阶段进度：演示步 + 修复后 trace 的全量重放（演示步全部固化时恰好等于修复后步数）
-      const healTotal = demoSteps.length + (trace.steps.length - 1 + demoSteps.length);
-      const outcome = await runHeal({
-        session, handle, tracker, collector, refs,
-        tracePath, trace, stepIndex: k,
-        demoSteps,
-        vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
-        dryRun: dryRun ?? false,
-        auth: authState,
-        demoObserver: new RunWatch({
-          handle, label: `自愈演示 · 第 ${k + 1} 步`, watch: session.watchEnabled,
-          progress, progressPrefix: "演示修正步 ", progressTotal: healTotal
-        }),
-        validationObserverFor: (vHandle) => new RunWatch({
-          handle: vHandle, label: "自愈验证", watch: session.watchEnabled,
-          progress, progressPrefix: "验证门 · 全量重放 ", progressOffset: demoSteps.length, progressTotal: healTotal
-        })
-      });
-      refTables.set(handle.pageId, refs);
-
-      if (outcome.status === "demo-failed") {
-        return { isError: true, content: [{ type: "text" as const,
-          text: notice + renderDemoFailure(outcome.failure) }] };
-      }
-
-      if (outcome.status === "validation-failed") {
-        if (outcome.validation.failure?.kind === "page-closed") {
-          return { isError: true, content: [{ type: "text" as const, text: notice +
-            "自愈验证的标签页已关闭，trace 未写回、未计自愈次数；恢复页面后重新运行。\n\n" +
-            renderRunRecord(outcome.validation) }] };
+    async ({ tracePath, actions, step, stepIndex, repairs, dryRun = false, pageId, auth, vars }, extra) => {
+      const fail = (text: string) => ({ isError: true, content: [{ type: "text" as const, text }] });
+      tracePath = await canonicalTracePath(tracePath);
+      if (healingTraces.has(tracePath)) return fail("该 trace 正在自愈，请等待当前调用结束后重试（未计自愈次数）。");
+      healingTraces.add(tracePath);
+      try {
+        if ([actions, step, repairs].filter((value) => value !== undefined).length !== 1 ||
+            (repairs !== undefined && stepIndex !== undefined)) {
+          return fail("actions、step 与 repairs 必须且只能提供一个；repairs 与顶层 stepIndex 互斥。");
         }
-        if (!validationCountsAgainstBudget(outcome.validation)) {
-          return { isError: true, content: [{ type: "text" as const, text: notice +
-            `✋ 验证被用户打断（第 ${k + 1} 步的修复未能完成全量重放），trace 未写回、未计自愈次数，请重试。\n\n` +
-            renderRunRecord(outcome.validation) }] };
+        const { trace, fingerprint } = await loadTraceSnapshot(tracePath);
+        const lastRun = lastRunByTrace.get(tracePath);
+        const k = stepIndex ?? lastRun?.failure?.failedIndex;
+        if (repairs === undefined && k === undefined) {
+          return fail("该 trace 没有待修复的失败记录。请先 replay 让它失败一次。");
         }
-        // 验证失败计入预算；lastRun 保持原始失败记录（步号对应磁盘上的 trace）
-        budget.perStep.set(k, (budget.perStep.get(k) ?? 0) + 1);
-        budget.total += 1;
-        healBudgets.set(tracePath, budget);
-        return { isError: true, content: [{ type: "text" as const, text: notice +
-          `❌ 修复未通过验证门（第 ${k + 1} 步的修复在新标签页全量重放时仍失败），trace 未写回。\n\n` +
-          renderRunRecord(outcome.validation) }] };
-      }
+        const evidence = healEvidence.get(tracePath);
+        if (evidence && evidence.fingerprint !== fingerprint) {
+          return fail("trace 文件已改变，旧失败证据已失效；请对当前文件重新 replay。");
+        }
 
-      // healed：写回成功 → 验证 run-record 就是这条 trace 的最新状态，开启新一轮周期
-      healBudgets.delete(tracePath);
-      if (!outcome.dryRun) lastRunByTrace.set(tracePath, outcome.validation);
-      const mode = outcome.dryRun ? "dry-run 验证通过（未写回）" : "已写回";
-      progress.report(healTotal, healTotal, mode);
-      return { content: [{ type: "text" as const, text: notice +
-        `✅ 自愈成功：第 ${k + 1} 步已由 ${(hasActions ? actions! : [step!]).length} 步修复替换，${mode}。\n\n` +
-        renderRunRecord(outcome.validation) }] };
+        const budget = healBudgets.get(tracePath) ?? { perStep: new Map<number, number>(), total: 0 };
+        const indices = repairs?.map((repair) => repair.stepIndex) ?? [k!];
+        if (new Set(indices).size !== indices.length) return fail("repairs 中 stepIndex 重复。");
+        for (const index of indices) {
+          if (index < 0 || index >= trace.steps.length) {
+            return fail(`stepIndex ${index} 超出范围：trace 只有 ${trace.steps.length} 步（0-based）。`);
+          }
+          if (trace.steps[index].action === "assert") {
+            return fail(`原第 ${index + 1} 步是断言，不可自动修复；断言失败可能是被测系统缺陷，需人工判定。`);
+          }
+          const gate = checkHealGate({
+            lastFailureKind: evidence?.failures.get(index), budget, stepIndex: index
+          });
+          if (!gate.ok) return fail(`原第 ${index + 1} 步（stepIndex=${index}）：${gate.reason}`);
+        }
+        const stableRepairs = repairs as TraceRepair[] | undefined;
+        // 稳定步骤形态在任何页面动作前完成完整校验；actions 在捕获 descriptor 后校验。
+        if (stableRepairs) buildRepairPlan(trace, stableRepairs);
+        if (step) buildRepairPlan(trace, [{ stepIndex: k!, steps: [step as Step] }]);
+        const { auth: authState, error: authError } = await resolveAuth(auth);
+        if (authError) return fail(authError);
+
+        const progress = ProgressReporter.from(extra);
+        const demoSteps = (actions ?? (step ? [step] : [])) as Step[];
+        const allRepairs = stableRepairs ?? [{ stepIndex: k!, steps: demoSteps }];
+        const candidateCount = trace.steps.length - allRepairs.length +
+          allRepairs.reduce((sum, repair) => sum + repair.steps.length, 0);
+        const demoCount = stableRepairs ? 0 : demoSteps.length;
+        const healTotal = demoCount + candidateCount;
+        const common = {
+          session, tracePath, trace, expectedFingerprint: fingerprint,
+          vars: { ...process.env, ...(vars ?? {}) } as Record<string, string>,
+          dryRun, auth: authState,
+          validationObserverFor: (vHandle: PageHandle) => new RunWatch({
+            handle: vHandle, label: "自愈验证", watch: session.watchEnabled,
+            progress, progressPrefix: "验证门 · 全量重放 ", progressOffset: demoCount, progressTotal: healTotal
+          })
+        };
+        let notice: string;
+        let outcome: Awaited<ReturnType<typeof runHeal>>;
+        if (stableRepairs) {
+          notice = notices(session);
+          outcome = await runMultiHeal({ ...common, repairs: stableRepairs });
+        } else {
+          const handle = await session.getPage(pageId);
+          notice = notices(session, handle);
+          const collector = await DiagnosticsCollector.attach(handle);
+          const tracker = await NetworkTracker.attach(handle);
+          const refs = refTables.get(handle.pageId) ?? new Map<string, number>();
+          outcome = await runHeal({
+            ...common, handle, tracker, collector, refs, stepIndex: k!, demoSteps,
+            demoObserver: new RunWatch({
+              handle, label: `自愈演示 · 第 ${k! + 1} 步`, watch: session.watchEnabled,
+              progress, progressPrefix: "演示修正步 ", progressTotal: healTotal
+            })
+          });
+          refTables.set(handle.pageId, refs);
+        }
+        if (outcome.status === "rejected") return fail(notice + outcome.reason);
+        if (outcome.status === "demo-failed") return fail(notice + renderDemoFailure(outcome.failure));
+        const { plan, validation } = outcome;
+        const states = assessRepairs(plan, validation).map((repair) => {
+          const label = { passed: "已通过", failed: "仍失败", "not-reached": "未完整执行" }[repair.status];
+          return `- 原第 ${repair.stepIndex + 1} 步（stepIndex=${repair.stepIndex}）：${repair.status}（${label}）`;
+        }).join("\n");
+
+        if (outcome.status === "validation-failed") {
+          const location = repairFailureLocation(plan, validation);
+          const failure = validation.failure;
+          // failed candidate 的步号不写入 lastRun；只学习未替换原步骤的失败证据。
+          const sameCycle = healEvidence.get(tracePath) === evidence;
+          if (sameCycle && location && location.repairIndex === undefined && failure && HEALABLE_KINDS.has(failure.kind)) {
+            evidence!.failures.set(location.originalIndex, failure.kind);
+          }
+          const charged = sameCycle && !dryRun && validationCountsAgainstBudget(validation) &&
+            location?.repairIndex !== undefined;
+          if (charged) {
+            const index = location!.originalIndex;
+            budget.perStep.set(index, (budget.perStep.get(index) ?? 0) + 1);
+            budget.total += 1;
+            healBudgets.set(tracePath, budget);
+          }
+          const blocker = location && failure
+            ? `阻塞点：原第 ${location.originalIndex + 1} 步（stepIndex=${location.originalIndex}），` +
+              `候选第 ${failure.failedIndex + 1} 步（index=${failure.failedIndex}）；` +
+              (location.repairIndex === undefined ? "未替换的原步骤失败。" : "该修复块失败。")
+            : "验证未完整执行，无法据此认定修复已通过。";
+          const interruption = failure?.kind === "page-closed"
+            ? "自愈验证的标签页已关闭；恢复页面后重新运行。\n"
+            : failure?.kind === "user-interrupted" ? "✋ 验证被用户打断，请重试。\n" : "";
+          const accounting = charged
+            ? `仅原第 ${location!.originalIndex + 1} 步计自愈次数；本轮已用 ${budget.total}/${MAX_HEALS_PER_TRACE}。\n`
+            : "未计自愈次数，已有预算保持不变。\n";
+          return fail(notice + `❌ ${dryRun ? "dry-run " : ""}修复未通过验证门，trace 未写回。\n` +
+            interruption + blocker + "\n" + accounting + states +
+            "\n\n可复用以下稳定修复步骤；补齐其他已确认故障后一起提交：\n\n" +
+            "```json\n" + JSON.stringify({ repairs: plan.repairs }, null, 2) + "\n```\n\n" +
+            "以下 run-record 使用候选步号：\n" + renderRunRecord(validation));
+        }
+        if (!outcome.dryRun) {
+          healBudgets.delete(tracePath);
+          healEvidence.delete(tracePath);
+          lastRunByTrace.set(tracePath, validation);
+        }
+        const mode = outcome.dryRun ? "dry-run 验证通过（未写回，预算保持不变）" : "已写回";
+        progress.report(healTotal, healTotal, mode);
+        return { content: [{ type: "text" as const, text: notice +
+          `✅ 自愈成功：${plan.repairs.length} 处修复全量验证通过，${mode}。\n` +
+          (outcome.auditWarning ? `⚠ ${outcome.auditWarning}\n` : "") +
+          states + "\n\n" + renderRunRecord(validation) }] };
+      } finally {
+        healingTraces.delete(tracePath);
+      }
     }
   );
 

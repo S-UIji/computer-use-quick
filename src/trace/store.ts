@@ -1,5 +1,6 @@
-import { writeFile, readFile, mkdir, appendFile, rename } from "node:fs/promises";
-import { join } from "node:path";
+import { writeFile, readFile, mkdir, appendFile, rename, rm, realpath } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { join, resolve } from "node:path";
 import type { Trace, Step, HealSidecarRecord } from "../types.js";
 
 /** 定位信息里出现这些字样即视为凭证字段。中文词不能少：中文系统的密码框标签就是「密码」 */
@@ -21,7 +22,9 @@ export function isPlaintextSecret(step: Step): boolean {
 
 export function assertNoSecrets(trace: Trace): void {
   for (const [i, step] of trace.steps.entries()) {
-    const t = (step as { target?: { ref?: string } }).target;
+    const direct = (step as { target?: { ref?: string } }).target;
+    const nested = step.action === "wait" && "target" in step.until ? step.until.target : undefined;
+    const t = [direct, nested].find((target) => target && "ref" in target);
     if (t && "ref" in t) {
       throw new Error(
         `第 ${i + 1} 步仍在使用 ref「${t.ref}」。ref 只在单次快照内有效，不能写进 trace——` +
@@ -45,8 +48,20 @@ export async function saveTrace(dir: string, trace: Trace): Promise<string> {
   return path;
 }
 
-export async function loadTrace(path: string): Promise<Trace> {
-  const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<Trace>;
+/** 证据、预算与互斥共用同一个文件身份（Windows 大小写和符号链接别名归一）。 */
+export async function canonicalTracePath(path: string): Promise<string> {
+  const absolute = await realpath(path).catch(() => resolve(path));
+  return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+}
+
+export function traceFingerprint(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+/** 同一次读取提供执行内容与原始文件指纹，避免证据绑定到别的版本。 */
+export async function loadTraceSnapshot(path: string): Promise<{ trace: Trace; fingerprint: string }> {
+  const content = await readFile(path, "utf8");
+  const parsed = JSON.parse(content) as Partial<Trace>;
   if (!Array.isArray(parsed.steps)) {
     throw new Error(`${path} 不是合法 trace：缺少 steps 数组`);
   }
@@ -54,11 +69,23 @@ export async function loadTrace(path: string): Promise<Trace> {
     throw new Error(`${path} 不是合法 trace：缺少 name 或 baseUrl`);
   }
   return {
-    name: parsed.name,
-    baseUrl: parsed.baseUrl,
-    createdAt: parsed.createdAt ?? "",
-    steps: parsed.steps
+    fingerprint: traceFingerprint(content),
+    trace: {
+      name: parsed.name, baseUrl: parsed.baseUrl,
+      createdAt: parsed.createdAt ?? "", steps: parsed.steps
+    }
   };
+}
+
+export async function loadTrace(path: string): Promise<Trace> {
+  return (await loadTraceSnapshot(path)).trace;
+}
+
+export class TraceChangedError extends Error {
+  constructor() {
+    super("trace 文件已改变，修复未写回；请对当前文件重新 replay。");
+    this.name = "TraceChangedError";
+  }
 }
 
 /**
@@ -66,11 +93,26 @@ export async function loadTrace(path: string): Promise<Trace> {
  * 序列化约定与 saveTrace 一致（2 空格缩进 + 末尾换行），配合 {...trace, steps}
  * 的改法，未触及的键序与内容逐字节不变，git diff 只体现被替换的步。
  */
-export async function atomicWriteTrace(tracePath: string, trace: Trace): Promise<void> {
+export async function atomicWriteTrace(
+  tracePath: string, trace: Trace, expectedFingerprint?: string
+): Promise<void> {
   assertNoSecrets(trace);
-  const tmp = `${tracePath}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(tmp, JSON.stringify(trace, null, 2) + "\n", "utf8");
-  await rename(tmp, tracePath);
+  const tmp = `${tracePath}.tmp-${randomUUID()}`;
+  try {
+    await writeFile(tmp, JSON.stringify(trace, null, 2) + "\n", "utf8");
+    if (expectedFingerprint !== undefined) {
+      let current: string;
+      try { current = await readFile(tracePath, "utf8"); }
+      catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") throw new TraceChangedError();
+        throw err;
+      }
+      if (traceFingerprint(current) !== expectedFingerprint) throw new TraceChangedError();
+    }
+    await rename(tmp, tracePath);
+  } finally {
+    await rm(tmp, { force: true });
+  }
 }
 
 /** heal 历史 sidecar 路径：traces/smoke-login.json → traces/smoke-login.heal.jsonl */

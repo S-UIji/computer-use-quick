@@ -9,7 +9,8 @@ import { DiagnosticsCollector } from "../diagnostics/collector.js";
 import { replayTrace, pageClosedRecord } from "./replay.js";
 import { PageClosedError } from "../session/pageErrors.js";
 import { failureUrlNotice } from "../session/pageUrl.js";
-import { atomicWriteTrace, appendHealRecord } from "./store.js";
+import { atomicWriteTrace, appendHealRecord, assertNoSecrets, loadTraceSnapshot, TraceChangedError } from "./store.js";
+import { buildRepairPlan, type RepairPlan, type TraceRepair } from "./repairPlan.js";
 import { applyAuth, type AuthState } from "../session/auth.js";
 
 /** 可自愈的失败类型。assert-failed 不在列：断言失败可能是被测系统真缺陷，自动改期望等于掩盖 bug */
@@ -29,8 +30,8 @@ export type HealGate = { ok: true } | { ok: false; reason: string };
 
 /**
  * 自愈前置护栏：失败类型白名单 + 预算。纯函数，server 在演示执行前调用。
- * 预算语义：验证重放每失败一次计 1 次（demo 失败不计——那是模型动作本身没走通，
- * 还没消耗验证资源）；trace 全量重放成功时由 server 清零，开启新一轮周期。
+ * 仅失败发生在替换块内时计入该原始点与总预算；后续原步骤失败不计。
+ * dryRun、demo 失败、页面关闭及用户中断不计；正式写回或真实 replay 全绿才清零。
  */
 export function checkHealGate(opts: {
   lastFailureKind: FailureKind | undefined;
@@ -38,7 +39,7 @@ export function checkHealGate(opts: {
   stepIndex: number;
 }): HealGate {
   if (opts.lastFailureKind === undefined) {
-    return { ok: false, reason: "该 trace 无失败记录，无法确认失败类型；请先 replay" };
+    return { ok: false, reason: "该原步骤无失败记录或对应证据，无法确认失败类型；请先 replay" };
   }
   if (opts.lastFailureKind === "page-closed") {
     return {
@@ -99,6 +100,7 @@ export interface RunHealOptions {
   refs: Map<string, number>;
   tracePath: string;
   trace: Trace;
+  expectedFingerprint?: string;
   stepIndex: number;
   demoSteps: Step[];
   vars: Record<string, string>;
@@ -113,29 +115,50 @@ export interface RunHealOptions {
   validationObserverFor?: (handle: PageHandle) => StepObserver | undefined;
 }
 
-/**
- * 自愈编排：演示捕获 → 新标签页全量重放验证门 → 通过则原子写回 + sidecar。
- * 写回与否、预算记账都由 outcome 表达，由调用方（server）落状态。
- */
-export async function runHeal(opts: RunHealOptions): Promise<HealOutcome> {
+export interface RunMultiHealOptions {
+  session: BrowserSession;
+  tracePath: string;
+  trace: Trace;
+  repairs: TraceRepair[];
+  vars: Record<string, string>;
+  dryRun: boolean;
+  expectedFingerprint?: string;
+  auth?: AuthState;
+  baselineRoot?: string;
+  validationObserverFor?: (handle: PageHandle) => StepObserver | undefined;
+}
+
+export type PlannedHealOutcome =
+  | (Exclude<HealOutcome, { status: "demo-failed" }> & { plan: RepairPlan; auditWarning?: string })
+  | Extract<HealOutcome, { status: "demo-failed" }>
+  | { status: "rejected"; reason: string };
+
+/** 单点先捕获稳定步骤，再与多点提交共用完整验证和一次写回。 */
+export async function runHeal(opts: RunHealOptions): Promise<PlannedHealOutcome> {
+  const expectedFingerprint = opts.expectedFingerprint ?? (await loadTraceSnapshot(opts.tracePath)).fingerprint;
   const demo = await runBatch({
-    handle: opts.handle,
-    tracker: opts.tracker,
-    collector: opts.collector,
-    refs: opts.refs,
-    vars: opts.vars,
-    steps: opts.demoSteps,
-    captureDescriptors: true,
-    observer: opts.demoObserver
+    handle: opts.handle, tracker: opts.tracker, collector: opts.collector,
+    refs: opts.refs, vars: opts.vars, steps: opts.demoSteps,
+    captureDescriptors: true, observer: opts.demoObserver
   });
   if (!demo.ok) {
     return { status: "demo-failed", stepIndex: opts.stepIndex, failure: demo.failure! };
   }
+  if (!demo.capturedSteps.length || demo.capturedSteps.length !== opts.demoSteps.length) {
+    return { status: "rejected", reason: "演示步骤捕获不完整，无法安全生成修复；trace 未写回、未计自愈次数，请重新 snapshot 并演示。" };
+  }
+  return runMultiHeal({
+    ...opts, expectedFingerprint,
+    repairs: [{ stepIndex: opts.stepIndex, steps: demo.capturedSteps }]
+  });
+}
 
-  const healed = buildHealedTrace(opts.trace, opts.stepIndex, demo.capturedSteps);
-
-  // 验证门：独立 BrowserContext 全量重放。不复用失败页（脏状态），
-  // 也不与之共享 cookie/storage——探索痕迹进不了验证，验证过了才算真修好。
+/** 稳定步骤直接构造候选；只在独立 Context 验证全绿后提交整条 trace。 */
+export async function runMultiHeal(opts: RunMultiHealOptions): Promise<PlannedHealOutcome> {
+  const plan = buildRepairPlan(opts.trace, opts.repairs);
+  const healed = plan.trace;
+  assertNoSecrets(healed);
+  const expectedFingerprint = opts.expectedFingerprint ?? (await loadTraceSnapshot(opts.tracePath)).fingerprint;
   let resource: Awaited<ReturnType<BrowserSession["newIsolatedPage"]>> | undefined;
   let validation: RunRecord;
   const validationStarted = Date.now();
@@ -148,7 +171,6 @@ export async function runHeal(opts: RunHealOptions): Promise<HealOutcome> {
     validation = await replayTrace({
       handle: vHandle, tracker: vTracker, collector: vCollector,
       trace: healed, vars: opts.vars,
-      // 验证门按 trace 名归位基线目录：视觉断言与正式回放比同一套基线
       visual: { traceName: opts.trace.name, baselineRoot: opts.baselineRoot },
       observer: opts.validationObserverFor?.(vHandle)
     });
@@ -160,26 +182,31 @@ export async function runHeal(opts: RunHealOptions): Promise<HealOutcome> {
     await resource?.release();
   }
 
-  if (!validation.ok) {
-    return { status: "validation-failed", stepIndex: opts.stepIndex, trace: healed, validation };
-  }
-
+  const stepIndex = plan.repairs[0].stepIndex;
+  if (!validation.ok) return { status: "validation-failed", stepIndex, trace: healed, validation, plan };
+  let auditWarning: string | undefined;
   if (!opts.dryRun) {
-    await atomicWriteTrace(opts.tracePath, healed);
-    await appendHealRecord(opts.tracePath, {
-      healedAt: new Date().toISOString(),
-      stepIndex: opts.stepIndex,
-      originalStep: opts.trace.steps[opts.stepIndex],
-      replacementSteps: demo.capturedSteps,
-      validation: {
-        ok: true,
-        durationMs: validation.durationMs,
-        driftCount: validation.drifts.length
-      }
-    });
+    try { await atomicWriteTrace(opts.tracePath, healed, expectedFingerprint); }
+    catch (err) {
+      if (err instanceof TraceChangedError) return { status: "rejected", reason: err.message };
+      throw err;
+    }
+    const repairs = plan.repairs.map((repair) => ({
+      stepIndex: repair.stepIndex,
+      originalStep: opts.trace.steps[repair.stepIndex],
+      replacementSteps: repair.steps
+    }));
+    try {
+      await appendHealRecord(opts.tracePath, {
+        healedAt: new Date().toISOString(), ...repairs[0], repairs,
+        validation: { ok: true, durationMs: validation.durationMs, driftCount: validation.drifts.length }
+      });
+    } catch (err) {
+      // trace 的原子替换已经完成；两个文件不是一个事务，不能假报未写回。
+      auditWarning = `trace 已写回，但 heal 审计追加失败：${err instanceof Error ? err.message : String(err)}。请检查 sidecar 路径和权限。`;
+    }
   }
-
-  return { status: "healed", dryRun: opts.dryRun, stepIndex: opts.stepIndex, trace: healed, validation };
+  return { status: "healed", dryRun: opts.dryRun, stepIndex, trace: healed, validation, plan, auditWarning };
 }
 
 /** demo-failed  outcome 的返回文本，与 batch 失败语义对齐（一次给全） */
