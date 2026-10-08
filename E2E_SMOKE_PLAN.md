@@ -97,7 +97,7 @@ node scripts/e2e-smoke.mjs
 | BUG-03 | heal 第 6 步演示成功，但第 10 步因重复数据失败；结果仍说“第 6 步修复失败” | R5 已实现并验收，随本次提交交付：多点稳定步骤提交、原始步号归因、逐点预算及一次全绿写回 |
 | BUG-04 | 关闭被操作标签后，不带 pageId 的下一次 batch 接管剩余用户标签并导航 | R7 已于 2026-10-08 修复并推送（`1cd7955`，已归档）：关闭后新开默认页；显式失效 ID 拒绝；用户页 URL/内容不变 |
 | BUG-05 | 用户退出后旧 descriptor 失败只报 `target-not-found`，没有 URL 变化提示 | R8 已于 2026-10-08 实现并推送（`6f81d38`，已归档）：按页检测完整 URL，返回变化提示及失败现场地址 |
-| BUG-06 | idle 角标长期位于顶部中央，遮住页面顶部内容 | R10，待命态应移到角落并缩短文案 |
+| BUG-06 | idle 角标长期位于顶部中央，遮住页面顶部内容 | R10 已验收，随本次提交交付：待命和中断角标右下角紧凑显示，顶部内容不再遮挡 |
 | BUG-07 | 慢导航期间约 200ms 采样不到 overlay（日志为 2/5 个采样缺失） | R12，跨文档导航时标注有空窗 |
 | BUG-08 | suite 3 并发 + 重试窗口出现在 (20,20)、(30,30)…，6 个窗口互相覆盖 | R13，无法同时观察并发任务 |
 | BUG-09 | 用户切到帮助页后，agent 执行刷新会把被操作页拉回前台，帮助页变 hidden | R14，打断用户当前工作 |
@@ -178,7 +178,15 @@ node scripts/e2e-smoke.mjs
 
 证据：`.scratch/r5-full-test.log`、`.scratch/r5-dryrun-final.log`、`.scratch/r5-smoke.log`、
 `.scratch/r5-evidence/result.json`、`progress.json`、`round-{1,2}-candidate-failure.md`、
-`round-{1,2}-audit.json`、`round-{1,2}-final.png`。R5 已验收，随本次提交交付；OpenSpec 在提交后同步归档。
+`round-{1,2}-audit.json`、`round-{1,2}-final.png`。R5 已在 `7783d97` 提交推送，并归档至 `2026-10-08-add-multi-point-heal`。
+
+## R10 非执行态角标验收（2026-10-08）
+
+- 待命文案缩短为“⏸ agent 待命”，待命和中断角标距右/下边缘 8px；中断保留红色描边。
+- 既有文字断言先 RED，再通过观察、隔离和关闭定向回归：5 文件 / 24 测试。
+- 最终全量回归：64 文件 / 523 测试全绿，318.10s。
+- 两轮有头 MCP 均检查三态、1000×700 与 360×640 视口：顶部按钮无遮挡、角标不越界、点击穿透为 trusted；截图已核对。
+- 专属 Chrome、MCP、临时 HTTP 服务及目录均已清理。证据：`.scratch/r10-full-test.log`、`r10-targeted.log`、`r10-headed.log`、`r10-evidence/result.json` 和各轮截图。
 
 ## 每次修复的验收门槛
 

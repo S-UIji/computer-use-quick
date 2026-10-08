@@ -8,7 +8,7 @@ describe("renderBadgeText 角标文案", () => {
   });
 
   it("待命", () => {
-    expect(renderBadgeText({ kind: "idle" })).toBe("⏸ 待命 · agent 可能随时继续，操作页面会干扰它");
+    expect(renderBadgeText({ kind: "idle" })).toBe("⏸ agent 待命");
   });
 
   it("已被打断", () => {

@@ -11,7 +11,7 @@ export function renderBadgeText(s: OverlayState): string {
     case "active":
       return `🤖 computer-use-quick 正在操作 · ${s.label} · 第 ${s.step}/${s.total} 步 ${s.action} · 请勿操作页面`;
     case "idle":
-      return "⏸ 待命 · agent 可能随时继续，操作页面会干扰它";
+      return "⏸ agent 待命";
     case "interrupted":
       return `✋ 检测到你的操作，执行已停止（第 ${s.stopStep} 步未完成）`;
   }
@@ -24,6 +24,10 @@ const CSS = `
   border-radius: 999px; background: rgba(76, 29, 149, .92); color: #fff; white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; box-shadow: 0 2px 8px rgba(0, 0, 0, .25); }
 .wrap[data-state="active"] .frame { animation: cuq-pulse 1.6s ease-in-out infinite; }
+.wrap[data-state="idle"] .badge, .wrap[data-state="interrupted"] .badge {
+  top: auto; left: auto; right: 8px; bottom: 8px; transform: none;
+  max-width: calc(100vw - 32px); padding: 3px 10px; font-size: 12px;
+}
 .wrap[data-state="idle"] .frame { display: none; }
 .wrap[data-state="idle"] .badge { background: rgba(55, 65, 81, .72); }
 .wrap[data-state="interrupted"] .frame { border-color: #dc2626; box-shadow: inset 0 0 18px rgba(220, 38, 38, .45);
