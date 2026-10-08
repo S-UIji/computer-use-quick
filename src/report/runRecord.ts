@@ -1,4 +1,5 @@
 import type { RunRecord } from "../types.js";
+import { failureUrlNotice } from "../session/pageUrl.js";
 
 export function renderRunRecord(rec: RunRecord): string {
   const stopAt = (rec.failure?.failedIndex ?? 0) + 1;
@@ -31,6 +32,7 @@ export function renderRunRecord(rec: RunRecord): string {
     lines.push(
       "", `## 失败上下文（heal_required=${rec.healRequired}）`, "",
       `**类型**：${f.kind}`, `**信息**：${f.message}`, "",
+      ...(f.currentUrl === undefined ? [] : [failureUrlNotice(f).trimEnd(), ""]),
       "**失败步骤**", "```json", JSON.stringify(f.failedStep, null, 2), "```", "",
       "**当前快照**", "```", f.snapshot, "```", "",
       `**console 报错**`, f.consoleErrors.join("\n") || "（无）", "",

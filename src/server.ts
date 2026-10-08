@@ -4,6 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { BrowserSession, PageHandle } from "./session/browser.js";
 import { DialogGuard, describeDialog } from "./session/dialogs.js";
+import { failureUrlNotice, pageChangeNotice } from "./session/pageUrl.js";
 import type { RunRecord, Step } from "./types.js";
 import { takeSnapshot } from "./perception/snapshot.js";
 import { diffLines, renderDiff } from "./perception/diff.js";
@@ -97,6 +98,8 @@ function notices(session: BrowserSession, handle?: PageHandle): string {
 
 export function createServer(session: BrowserSession): McpServer {
   const server = new McpServer({ name: "computer-use-quick", version: "0.1.0" });
+  // 只在本服务实例内保存原始 URL，避免不同会话的观察基线串扰。
+  const observedUrls = new Map<string, string>();
 
   server.registerTool(
     "snapshot",
@@ -119,6 +122,7 @@ export function createServer(session: BrowserSession): McpServer {
       await DiagnosticsCollector.attach(handle);
       const snap = await takeSnapshot(handle, { expand, threshold });
       refTables.set(handle.pageId, snap.refs);
+      observedUrls.set(handle.pageId, handle.page.url());
 
       // 任何参数的 snapshot 都刷新 diff 基线
       const prev = lastSnapshots.get(handle.pageId);
@@ -181,7 +185,7 @@ export function createServer(session: BrowserSession): McpServer {
     },
     async ({ pageId, steps, vars, stability, resolveRetryMs }, extra) => {
       const handle = await session.getPage(pageId);
-      const notice = notices(session, handle);
+      const notice = pageChangeNotice(observedUrls.get(handle.pageId), handle.page.url()) + notices(session, handle);
       const collector = await DiagnosticsCollector.attach(handle);
       const tracker = await NetworkTracker.attach(handle);
       const refs = refTables.get(handle.pageId) ?? new Map<string, number>();
@@ -198,6 +202,8 @@ export function createServer(session: BrowserSession): McpServer {
       });
       refTables.set(handle.pageId, refs);
       recordSteps(handle.pageId, r.capturedSteps);
+      // 成功与步骤失败都已把现场返回给调用方，以批次终态作为下一次比较基线。
+      observedUrls.set(handle.pageId, handle.page.url());
 
       if (r.ok) {
         const total = r.results.reduce((a, s) => a + s.durationMs, 0);
@@ -218,6 +224,7 @@ export function createServer(session: BrowserSession): McpServer {
       // isError 让客户端在协议层就能看出失败，不必去解析文案
       return { isError: true, content: [{ type: "text" as const, text: notice +
         `${head}\n${f.message}\n\n` +
+        failureUrlNotice(f) +
         (watch.setupWarning ? `⚠ ${watch.setupWarning}\n\n` : "") +
         `## 失败步骤\n${JSON.stringify(f.failedStep, null, 2)}\n\n` +
         (f.candidates?.length ? `## 同容器内的其它文字（可用于消歧）\n${f.candidates.join("\n")}\n\n` : "") +

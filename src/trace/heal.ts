@@ -8,6 +8,7 @@ import { NetworkTracker } from "../waiter/stability.js";
 import { DiagnosticsCollector } from "../diagnostics/collector.js";
 import { replayTrace, pageClosedRecord } from "./replay.js";
 import { PageClosedError } from "../session/pageErrors.js";
+import { failureUrlNotice } from "../session/pageUrl.js";
 import { atomicWriteTrace, appendHealRecord } from "./store.js";
 import { applyAuth, type AuthState } from "../session/auth.js";
 
@@ -185,6 +186,7 @@ export async function runHeal(opts: RunHealOptions): Promise<HealOutcome> {
 export function renderDemoFailure(f: FailureContext): string {
   return (
     `❌ 演示步失败（第 ${f.failedIndex + 1} 步）：${f.kind}\n${f.message}\n\n` +
+    failureUrlNotice(f) +
     `## 失败步骤\n${JSON.stringify(f.failedStep, null, 2)}\n\n` +
     (f.candidates?.length ? `## 同容器内的其它文字（可用于消歧）\n${f.candidates.join("\n")}\n\n` : "") +
     `## 当前快照\n${f.snapshot}\n\n` +

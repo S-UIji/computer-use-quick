@@ -167,6 +167,8 @@ export interface FailureContext {
   message: string;
   snapshot: string;
   candidates?: string[];
+  /** 失败时采集的展示 URL；已隐藏明显凭证，旧记录或无句柄时可省略。 */
+  currentUrl?: string;
   consoleErrors: string[];
   failedRequests: string[];
 }

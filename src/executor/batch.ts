@@ -1,5 +1,6 @@
 import type { PageHandle } from "../session/browser.js";
 import { PageClosedError, assertPageOpen } from "../session/pageErrors.js";
+import { displayPageUrl } from "../session/pageUrl.js";
 import type { NetworkTracker } from "../waiter/stability.js";
 import type { DiagnosticsCollector } from "../diagnostics/collector.js";
 import type { FailureContext, FailureKind, RunArtifact, Step, StepResult, VisualOptions } from "../types.js";
@@ -95,6 +96,8 @@ async function failureAt(
   message: string,
   candidates?: string[]
 ): Promise<FailureContext> {
+  let currentUrl: string | undefined;
+  try { currentUrl = displayPageUrl(opts.handle.page.url()); } catch { /* URL 诊断失败不掩盖原错误 */ }
   let snapshotText = "（快照获取失败）";
   try {
     snapshotText = (await takeSnapshot(opts.handle)).text;
@@ -105,6 +108,7 @@ async function failureAt(
     kind,
     message,
     snapshot: snapshotText,
+    currentUrl,
     candidates: candidates?.slice(0, 10),
     consoleErrors: opts.collector.consoleErrors(),
     failedRequests: opts.collector.failedRequests()

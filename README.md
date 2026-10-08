@@ -78,6 +78,17 @@ Chrome 不在常见位置（或想用 Edge）时，用 `CUQ_CHROME_PATH` 指定�
 执行中或收尾时页面关闭会报告 `page-closed`；套件不自动重试，
 回放不要求自愈。自愈验证页被关闭时不写回 trace、不扣预算，恢复页面后重新运行。
 
+## 页面变化提示
+
+成功的 `snapshot`（包括 diff）和完成的 `batch` 会按标签页记录 URL。
+下一次 batch 开始时地址有变化，响应前缀会展示前后 URL，并提示
+“ref 可能已失效，请先 snapshot 确认”。提示在该批次返回时出现，批次仍按原有规则执行，
+不会自动阻断或重试；批次自身的导航会更新终态基线，不影响下一次判断。
+
+失败上下文附带当前 URL；关闭页面时标明最后已知地址。
+新增 URL 诊断会隐藏 userinfo 和 token/password/secret 等明显凭证参数，
+但不承诺识别任意业务参数。query/hash 变化会被检测；同 URL 刷新和纯 DOM 变化不在本项范围内。
+
 ## 三种用法
 
 **探索式测试**：`snapshot` 看页面 → `batch` 执行一批 → 再 `snapshot` 确认 → 循环。
@@ -233,7 +244,7 @@ SIGTERM、Ctrl+C）或调用 `BrowserSession.close()` 时会先撤掉所有标�
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（55 个文件 / 419 个测试）
+npm test                  # 先 tsc 构建再跑全部（58 个文件 / 447 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```
