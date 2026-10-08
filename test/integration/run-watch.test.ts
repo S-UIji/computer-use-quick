@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeAll, afterAll, inject, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach, inject, vi } from "vitest";
 import { BrowserSession, type PageHandle } from "../../src/session/browser.js";
 import { NetworkTracker } from "../../src/waiter/stability.js";
 import { DiagnosticsCollector } from "../../src/diagnostics/collector.js";
 import { runBatch } from "../../src/executor/batch.js";
 import { RunWatch } from "../../src/watch/runWatch.js";
 import { ProgressReporter } from "../../src/watch/progress.js";
-import { renderBadgeText } from "../../src/watch/overlay.js";
+import { renderBadgeText, removeOverlay } from "../../src/watch/overlay.js";
 import type { Descriptor, Step } from "../../src/types.js";
 
 let session: BrowserSession;
@@ -22,6 +22,7 @@ beforeAll(async () => {
   collector = await DiagnosticsCollector.attach(handle);
 });
 afterAll(async () => { await session?.close(); });
+afterEach(async () => { await removeOverlay(handle); });
 
 const css = (value: string): { descriptor: Descriptor } => ({
   descriptor: { strategies: [{ kind: "css", value }], framePath: [] }
@@ -34,7 +35,7 @@ async function evalValue<T>(expression: string): Promise<T> {
   return result.value;
 }
 
-/** 轮询角标文字直到包含 match（导航后要等下一步开始才会补挂） */
+/** 轮询角标文字直到包含 match。 */
 async function pollBadge(match: string, ms = 5000): Promise<string> {
   const t0 = Date.now();
   for (;;) {

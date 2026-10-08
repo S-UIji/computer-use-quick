@@ -70,6 +70,7 @@ const APPLY_FN = `function (state, text, css) {
     document.documentElement.appendChild(host);
     o = window.__cuqOverlay = { host: host, wrap: wrap, badge: badge };
   }
+  o.wrap.style.display = "";
   o.wrap.setAttribute("data-state", state);
   o.badge.textContent = text;
   return true;
@@ -95,32 +96,93 @@ async function evalOk(handle: PageHandle, expression: string): Promise<boolean> 
   }
 }
 
-/** 尽力而为：失败不抛（页面跳转中、上下文已销毁等），下一步开始时会再补挂 */
-export async function showOverlay(handle: PageHandle, state: OverlayState): Promise<void> {
-  const expression =
-    `(${APPLY_FN})(${JSON.stringify(state.kind)}, ${JSON.stringify(renderBadgeText(state))}, ${JSON.stringify(CSS)})`;
-  if (await evalOk(handle, expression)) overlaid.add(handle);
+interface OverlayEntry {
+  state: OverlayState;
+  hidden: number;
+  pending: Promise<void>;
+  dispose: () => void;
+}
+const overlayEntries = new WeakMap<PageHandle, OverlayEntry>();
+
+function forgetOverlay(handle: PageHandle, entry: OverlayEntry): void {
+  if (overlayEntries.get(handle) !== entry) return;
+  overlayEntries.delete(handle);
+  overlaid.delete(handle);
+  entry.dispose();
 }
 
-/**
- * 截图期间隐藏标注。只改 shadow 内部样式（隐式等待看不到）；隐藏失败降级为移除宿主
- * （多一次 DOM 变化，但保证截图干净），再失败就照常截图并向 stderr 记一行。
- */
-export async function withOverlayHidden<T>(handle: PageHandle, fn: () => Promise<T>): Promise<T> {
-  if (!overlaid.has(handle)) return fn();
-  const hidden =
-    await evalOk(handle, `window.__cuqOverlay ? (window.__cuqOverlay.wrap.style.display = "none", true) : true`) ||
-    await evalOk(handle, REMOVE_EXPR);
-  if (!hidden) console.error("[computer-use-quick] 截图前隐藏标注失败，截图可能含标注");
+function overlayEntry(handle: PageHandle, state: OverlayState): OverlayEntry {
+  const existing = overlayEntries.get(handle);
+  if (existing) {
+    existing.state = state;
+    return existing;
+  }
+  const entry: OverlayEntry = { state, hidden: 0, pending: Promise.resolve(), dispose: () => {} };
+  overlayEntries.set(handle, entry);
+  const restore = () => { void applyLatest(handle, entry); };
+  const closed = () => { forgetOverlay(handle, entry); };
+  entry.dispose = () => {
+    try {
+      handle.page.off("domcontentloaded", restore);
+      handle.page.off("close", closed);
+    } catch { /* 假句柄和已销毁页面也不影响执行。 */ }
+  };
   try {
+    handle.page.on("domcontentloaded", restore);
+    handle.page.once("close", closed);
+  } catch { entry.dispose(); }
+  return entry;
+}
+
+/** 串行应用最新状态；截图隐藏和移除期间不会被晚到的导航恢复覆盖。 */
+function applyLatest(handle: PageHandle, entry: OverlayEntry): Promise<void> {
+  entry.pending = entry.pending.then(async () => {
+    if (overlayEntries.get(handle) !== entry || entry.hidden > 0) return;
+    const state = entry.state;
+    const expression =
+      `(${APPLY_FN})(${JSON.stringify(state.kind)}, ${JSON.stringify(renderBadgeText(state))}, ${JSON.stringify(CSS)})`;
+    if (await evalOk(handle, expression) && overlayEntries.get(handle) === entry) overlaid.add(handle);
+  }).catch(() => { /* 标注是尽力而为。 */ });
+  return entry.pending;
+}
+
+/** 首次展示时订阅主文档加载；后续调用只更新同一页的最近状态。 */
+export async function showOverlay(handle: PageHandle, state: OverlayState): Promise<void> {
+  if (handle.page.isClosed?.()) return;
+  await applyLatest(handle, overlayEntry(handle, state));
+}
+
+/** 隐藏期间暂停导航恢复；嵌套隐藏全部结束后才恢复最新状态。 */
+export async function withOverlayHidden<T>(handle: PageHandle, fn: () => Promise<T>): Promise<T> {
+  const entry = overlayEntries.get(handle);
+  if (!entry && !overlaid.has(handle)) return fn();
+  if (entry) {
+    entry.hidden += 1;
+    await entry.pending;
+  }
+  try {
+    const hidden =
+      await evalOk(handle, `window.__cuqOverlay ? (window.__cuqOverlay.wrap.style.display = "none", true) : true`) ||
+      await evalOk(handle, REMOVE_EXPR);
+    if (!hidden) console.error("[computer-use-quick] 截图前隐藏标注失败，截图可能含标注");
     return await fn();
   } finally {
-    await evalOk(handle, `window.__cuqOverlay && (window.__cuqOverlay.wrap.style.display = "")`);
+    if (entry) {
+      entry.hidden -= 1;
+      if (entry.hidden === 0) await applyLatest(handle, entry);
+    } else {
+      await evalOk(handle, `window.__cuqOverlay && (window.__cuqOverlay.wrap.style.display = "")`);
+    }
   }
 }
 
-/** 移除标注，尽力而为 */
+/** 先取消恢复并等待已发送的应用，再移除宿主，避免异步重挂。 */
 export async function removeOverlay(handle: PageHandle): Promise<void> {
+  const entry = overlayEntries.get(handle);
+  if (entry) {
+    forgetOverlay(handle, entry);
+    await entry.pending;
+  }
   await evalOk(handle, REMOVE_EXPR);
   overlaid.delete(handle);
 }
@@ -128,7 +190,7 @@ export async function removeOverlay(handle: PageHandle): Promise<void> {
 /** 服务端退出时清理：只处理挂过标注的页面，总时长封顶，不拖住退出 */
 export async function removeAllOverlays(handles: PageHandle[], timeoutMs = 1000): Promise<void> {
   await Promise.race([
-    Promise.all(handles.filter((h) => overlaid.has(h)).map(removeOverlay)),
+    Promise.all(handles.filter((h) => overlaid.has(h) || overlayEntries.has(h)).map(removeOverlay)),
     new Promise<void>((resolve) => { setTimeout(resolve, timeoutMs).unref(); })
   ]);
 }

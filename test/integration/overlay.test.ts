@@ -54,11 +54,12 @@ describe("页面标注", () => {
       .toBe(renderBadgeText({ kind: "interrupted", stopStep: 3 }));
   });
 
-  it("跳转后丢失，再次调用补挂", async () => {
-    await goto("/watch.html");
-    expect(await hostCount()).toBe(0);
+  it("跳转后自动恢复最近状态，无需再次调用补挂", async () => {
     await showOverlay(handle, active);
+    await goto("/watch.html");
+    await handle.page.waitForFunction(() => (window as any).__cuqOverlay?.wrap.dataset.state === "active");
     expect(await hostCount()).toBe(1);
+    expect(await evalValue<string>(`window.__cuqOverlay.badge.textContent`)).toBe(renderBadgeText(active));
   });
 
   it("removeOverlay 移除宿主", async () => {
