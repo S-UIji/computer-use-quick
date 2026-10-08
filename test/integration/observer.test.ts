@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, inject } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, inject, vi } from "vitest";
 import { BrowserSession, type PageHandle } from "../../src/session/browser.js";
 import { NetworkTracker } from "../../src/waiter/stability.js";
 import { DiagnosticsCollector } from "../../src/diagnostics/collector.js";
@@ -6,6 +6,8 @@ import { runBatch } from "../../src/executor/batch.js";
 import type { Descriptor, Step } from "../../src/types.js";
 import { FakeObserver, RecordingGate } from "../fixtures/fake-observer.js";
 import { replayTrace } from "../../src/trace/replay.js";
+import { RunWatch } from "../../src/watch/runWatch.js";
+import { ProgressReporter } from "../../src/watch/progress.js";
 import type { Trace } from "../../src/types.js";
 
 let session: BrowserSession;
@@ -185,5 +187,31 @@ describe("replayTrace 透传观察者", () => {
     expect(rec.failure?.failedStep).toEqual(t.steps[1]);
     expect(rec.healRequired).toBe(false);
     expect(obs.events.at(-1)).toBe("done:false:1:true");
+  });
+});
+
+describe("中断结束进度的真实trace步号", () => {
+  it("slowMo 边界中断报告第2步，进度保持第1步，watch关闭也有效", async () => {
+    const sendNotification = vi.fn().mockResolvedValue(undefined);
+    const progress = ProgressReporter.from({ _meta: { progressToken: "slow-stop" }, sendNotification });
+    class InterruptedWatch extends RunWatch {
+      private seen = false;
+      override takeInterruption() {
+        if (this.seen) return undefined;
+        this.seen = true;
+        return { type: "keydown" as const, x: 0, y: 0 };
+      }
+    }
+    const observer = new InterruptedWatch({ handle, label: "慢放", watch: false, progress });
+    const rec = await replayTrace({ handle, tracker, collector, vars: {}, slowMoMs: 30, observer,
+      trace: { name: "slow-stop", baseUrl: fx.url, createdAt: "", steps: [
+        { action: "navigate", url: "/form.html" }, { action: "fill", target: css("#user"), value: "不执行" }
+      ] } });
+    expect(rec.failure?.failedIndex).toBe(1);
+    expect(rec.failure?.kind).toBe("user-interrupted");
+    const params = sendNotification.mock.calls.at(-1)![0].params;
+    expect(params).toMatchObject({ progress: 1, total: 2 });
+    expect(params.message).toContain("停在第 2 步");
+    expect(await handle.page.$eval("#user", el => (el as HTMLInputElement).value)).toBe("");
   });
 });

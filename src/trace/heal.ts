@@ -9,6 +9,7 @@ import { DiagnosticsCollector } from "../diagnostics/collector.js";
 import { replayTrace, pageClosedRecord } from "./replay.js";
 import { PageClosedError } from "../session/pageErrors.js";
 import { failureUrlNotice } from "../session/pageUrl.js";
+import { interruptionRecovery } from "../report/interruptionRecovery.js";
 import { atomicWriteTrace, appendHealRecord, assertNoSecrets, loadTraceSnapshot, TraceChangedError } from "./store.js";
 import { buildRepairPlan, type RepairPlan, type TraceRepair } from "./repairPlan.js";
 import { applyAuth, type AuthState } from "../session/auth.js";
@@ -213,6 +214,7 @@ export async function runMultiHeal(opts: RunMultiHealOptions): Promise<PlannedHe
 export function renderDemoFailure(f: FailureContext): string {
   return (
     `❌ 演示步失败（第 ${f.failedIndex + 1} 步）：${f.kind}\n${f.message}\n\n` +
+    interruptionRecovery(f, "heal") +
     failureUrlNotice(f) +
     `## 失败步骤\n${JSON.stringify(f.failedStep, null, 2)}\n\n` +
     (f.candidates?.length ? `## 同容器内的其它文字（可用于消歧）\n${f.candidates.join("\n")}\n\n` : "") +

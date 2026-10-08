@@ -22,6 +22,7 @@ import { buildRepairPlan, assessRepairs, repairFailureLocation, type TraceRepair
 import { archiveRun } from "./report/archive.js";
 import { renderSuiteResult, renderTraceEvent } from "./report/suiteReport.js";
 import { renderRunRecord } from "./report/runRecord.js";
+import { interruptionRecovery } from "./report/interruptionRecovery.js";
 import { captureAuth, applyAuth, loadAuth, type AuthState } from "./session/auth.js";
 import { RunWatch } from "./watch/runWatch.js";
 import { ProgressReporter } from "./watch/progress.js";
@@ -242,6 +243,7 @@ export function createServer(session: BrowserSession): McpServer {
       // isError 让客户端在协议层就能看出失败，不必去解析文案
       return { isError: true, content: [{ type: "text" as const, text: notice +
         `${head}\n${f.message}\n\n` +
+        interruptionRecovery(f, "batch") +
         failureUrlNotice(f) +
         (watch.setupWarning ? `⚠ ${watch.setupWarning}\n\n` : "") +
         `## 失败步骤\n${JSON.stringify(f.failedStep, null, 2)}\n\n` +
@@ -584,15 +586,18 @@ export function createServer(session: BrowserSession): McpServer {
             : "验证未完整执行，无法据此认定修复已通过。";
           const interruption = failure?.kind === "page-closed"
             ? "自愈验证的标签页已关闭；恢复页面后重新运行。\n"
-            : failure?.kind === "user-interrupted" ? "✋ 验证被用户打断，请重试。\n" : "";
+            : failure?.kind === "user-interrupted" ? "✋ 验证被用户打断，trace 未写回。\n" : "";
           const accounting = charged
             ? `仅原第 ${location!.originalIndex + 1} 步计自愈次数；本轮已用 ${budget.total}/${MAX_HEALS_PER_TRACE}。\n`
             : "未计自愈次数，已有预算保持不变。\n";
+          const repairHint = failure?.kind === "user-interrupted"
+            ? "保留以下稳定修复步骤；用户操作完成并核实状态后重新提交："
+            : "可复用以下稳定修复步骤；补齐其他已确认故障后一起提交：";
           return fail(notice + `❌ ${dryRun ? "dry-run " : ""}修复未通过验证门，trace 未写回。\n` +
             interruption + blocker + "\n" + accounting + states +
-            "\n\n可复用以下稳定修复步骤；补齐其他已确认故障后一起提交：\n\n" +
+            "\n\n" + repairHint + "\n\n" +
             "```json\n" + JSON.stringify({ repairs: plan.repairs }, null, 2) + "\n```\n\n" +
-            "以下 run-record 使用候选步号：\n" + renderRunRecord(validation));
+            "以下 run-record 使用候选步号：\n" + renderRunRecord(validation, "heal"));
         }
         if (!outcome.dryRun) {
           healBudgets.delete(tracePath);
@@ -604,7 +609,7 @@ export function createServer(session: BrowserSession): McpServer {
         return { content: [{ type: "text" as const, text: notice +
           `✅ 自愈成功：${plan.repairs.length} 处修复全量验证通过，${mode}。\n` +
           (outcome.auditWarning ? `⚠ ${outcome.auditWarning}\n` : "") +
-          states + "\n\n" + renderRunRecord(validation) }] };
+          states + "\n\n" + renderRunRecord(validation, "heal") }] };
       } finally {
         healingTraces.delete(tracePath);
       }

@@ -27,6 +27,8 @@ export class RunWatch implements StepObserver {
   /** 介入检测没能启用时的原因，由 server 附在工具结果里 */
   setupWarning?: string;
   private total = 0;
+  private reportedSteps = 0;
+  private ended = false;
   private readonly monitor?: InterventionMonitor;
 
   constructor(private readonly opts: RunWatchOptions) {
@@ -43,6 +45,8 @@ export class RunWatch implements StepObserver {
 
   async onRunStart(total: number): Promise<void> {
     this.total = total;
+    this.reportedSteps = 0;
+    this.ended = false;
     if (!this.monitor) return;
     await this.monitor.arm();
     if (this.monitor.installError) this.setupWarning = `介入检测未能启用：${this.monitor.installError}`;
@@ -56,6 +60,7 @@ export class RunWatch implements StepObserver {
   }
 
   async onStepEnd(result: StepResult): Promise<void> {
+    this.reportedSteps = Math.max(this.reportedSteps, result.index + 1);
     const { progress, progressPrefix = "", progressOffset = 0, progressTotal } = this.opts;
     progress?.report(
       progressOffset + result.index + 1,
@@ -65,6 +70,15 @@ export class RunWatch implements StepObserver {
   }
 
   async onRunEnd(outcome: RunOutcome): Promise<void> {
+    if (this.ended) return;
+    this.ended = true;
+    if (!outcome.ok && outcome.interrupted && outcome.failedIndex !== undefined) {
+      const { progress, progressPrefix = "", progressOffset = 0, progressTotal } = this.opts;
+      progress?.report(
+        progressOffset + this.reportedSteps, progressTotal ?? this.total,
+        `${progressPrefix}✋ 已被用户打断，停在第 ${outcome.failedIndex + 1} 步；请等待用户操作完成。`
+      );
+    }
     if (!this.monitor) return;
     await this.monitor.disarm();
     await showOverlay(
