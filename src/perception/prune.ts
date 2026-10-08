@@ -33,6 +33,7 @@ const TEXT_ROLES = new Set(["StaticText", "InlineTextBox"]);
  * `ancestorName` 是最近一个【被保留的】祖先的可及名称，用于判断文本是否冗余。
  */
 function isKeepable(role: string, name: string, ancestorName: string): boolean {
+  if (role === "row" || role === "LayoutTableRow") return true; // 表格行边界不依赖可及名称
   if (INTERACTIVE_ROLES.has(role)) return true;
   if (SEMANTIC_TEXT_ROLES.has(role)) return true;
   if (TEXT_ROLES.has(role)) {
@@ -67,7 +68,10 @@ export function prune(
     const keep = !n.ignored && isKeepable(role, name, ancestorName);
 
     // ancestorName 只在节点真的被保留时才推进，保证它始终指向"最近的保留祖先"
-    const children = (n.childIds ?? []).flatMap((c) => walk(c, keep ? name : ancestorName));
+    // row 名可能由整行内容合成，不能拿它过滤行内文本。
+    const isRow = role === "row" || role === "LayoutTableRow";
+    const childAncestorName = keep ? (isRow ? "" : name) : ancestorName;
+    const children = (n.childIds ?? []).flatMap((c) => walk(c, childAncestorName));
 
     if (!keep) return children;
 
@@ -75,7 +79,7 @@ export function prune(
     // 就是纯重复（<td><button>删除</button></td> 会产生 cell "删除" + button "删除"）。
     // 交互节点和语义文本节点不适用——它们本身就有价值。
     const keptByNameOnly =
-      !INTERACTIVE_ROLES.has(role) && !SEMANTIC_TEXT_ROLES.has(role) && !TEXT_ROLES.has(role);
+      !isRow && !INTERACTIVE_ROLES.has(role) && !SEMANTIC_TEXT_ROLES.has(role) && !TEXT_ROLES.has(role);
     if (keptByNameOnly && children.length === 1 && children[0].name === name) {
       return children;
     }

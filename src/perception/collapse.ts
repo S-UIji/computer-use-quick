@@ -4,7 +4,7 @@ import { isCollapsedGroup } from "../types.js";
 export interface CollapseOptions {
   threshold?: number;
   expand?: string[];
-  /** 重复单元的最大长度。行容器被裁掉后，一"行"会摊平成若干兄弟节点 */
+  /** 重复单元的最大长度。无语义卡片容器被裁掉后会摊平成若干兄弟节点 */
   maxPeriod?: number;
 }
 
@@ -23,12 +23,29 @@ function stableId(sig: string, path: string): string {
   return `g${(h >>> 0).toString(36)}`;
 }
 
-/** 取一个节点的可读摘要：自身 name + 所有后代里的非空文本，去重后拼接 */
-function summarize(node: PrunedNode): string {
+/** 取可读摘要；表格按列保留重复值，普通容器去重，已有子组内容不得丢失。 */
+function summarize(node: SnapshotNode): string {
+  if (isCollapsedGroup(node)) return [...node.fields, ...node.items].join(" · ");
+  if (node.role === "row" || node.role === "LayoutTableRow") {
+    // 按列拼接，金额和数量即使相同也不能跨列去重。
+    const cells = node.children.map((cell) => {
+      if (isCollapsedGroup(cell)) return summarize(cell);
+      const children = cell.children.map(summarize).filter(Boolean);
+      // cell/row 的名称常由后代自动合成；只去掉确认是整段副本的名称。
+      return children.length > 0 && cell.name === children.join(" ").replaceAll(" · ", " ")
+        ? children.join(" · ") : summarize(cell);
+    }).filter(Boolean);
+    const name = node.name === cells.join(" ").replaceAll(" · ", " ") ? "" : node.name;
+    return [name, ...cells].filter(Boolean).join(" · ");
+  }
   const parts: string[] = [];
   if (node.name) parts.push(node.name);
   const walk = (n: SnapshotNode): void => {
-    if (isCollapsedGroup(n)) return;
+    if (isCollapsedGroup(n)) {
+      const summary = summarize(n);
+      if (summary && !parts.includes(summary)) parts.push(summary);
+      return;
+    }
     if (n.name && !parts.includes(n.name)) parts.push(n.name);
     for (const c of n.children) walk(c);
   };
@@ -61,6 +78,8 @@ export function collapse(root: PrunedNode, opts: CollapseOptions = {}): PrunedNo
     const kids = node.children.map((c, i) =>
       isCollapsedGroup(c) ? c : walk(c, `${path}/${c.role}[${i}]`)
     );
+    // 表格行内直接子项代表不同列，不能按相似结构横向折叠。
+    if (node.role === "row" || node.role === "LayoutTableRow") return { ...node, children: kids };
     const sigs = kids.map((k) => signature(k));
 
     const out: SnapshotNode[] = [];
@@ -69,7 +88,7 @@ export function collapse(root: PrunedNode, opts: CollapseOptions = {}): PrunedNo
       if (isCollapsedGroup(kids[i])) { out.push(kids[i]); i++; continue; }
 
       // 找能达到阈值的【最小】周期。p=1 就是"N 个连续相同兄弟"这种简单情形；
-      // p>1 覆盖行容器被裁掉后摊平的重复单元（靶场的部门卡片正是如此）。
+      // p>1 覆盖无语义容器被裁掉后摊平的重复单元（靶场的部门卡片正是如此）。
       let best: { p: number; reps: number } | null = null;
       for (let p = 1; p <= Math.min(maxPeriod, kids.length - i); p++) {
         if (kids.slice(i, i + p).some(isCollapsedGroup)) break;
@@ -81,6 +100,12 @@ export function collapse(root: PrunedNode, opts: CollapseOptions = {}): PrunedNo
 
       const { p, reps } = best;
       const span = kids.slice(i, i + p * reps) as PrunedNode[];
+      // 整段放行，不能继续尝试更大周期将 6/9 个同质叶子再次折叠。
+      if (p === 1 && span.every((n) => n.children.length === 0)) {
+        out.push(...span);
+        i += span.length;
+        continue;
+      }
       const groupId = stableId(sigs.slice(i, i + p).join("|"), `${path}#${i}`);
 
       if (expand.has(groupId)) {
@@ -105,7 +130,7 @@ export function collapse(root: PrunedNode, opts: CollapseOptions = {}): PrunedNo
         out.push({
           kind: "collapsed-group",
           count: reps,
-          fields: fields.length ? fields : cells[0].filter((v) => v.length > 0),
+          fields,
           items,
           groupId
         } satisfies CollapsedGroup);

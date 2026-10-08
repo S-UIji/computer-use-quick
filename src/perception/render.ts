@@ -16,7 +16,8 @@ export function render(root: PrunedNode): { text: string; refs: Map<string, numb
 
     if (isCollapsedGroup(node)) {
       lines.push(
-        `${pad}[${node.count} 项结构相同，展开用 expand=["${node.groupId}"]，字段：${node.fields.join("/")}]`
+        `${pad}[${node.count} 项结构相同，展开用 expand=["${node.groupId}"]` +
+        (node.fields.length ? `，字段：${node.fields.join("/")}` : "") + "]"
       );
       node.items.forEach((it, i) => lines.push(`${pad}  ${i + 1}. ${it}`));
       return;

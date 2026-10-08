@@ -97,13 +97,13 @@ describe("collapse", () => {
     expect(g.items.join()).not.toContain("查看详情"); // 常量不该重复 5 遍
   });
 
-  it("优先选最小周期：40 个相同按钮走 p=1 而非 p=2", () => {
+  it("40 个同名叶子按钮也保持展开，不经更大周期重新折叠", () => {
     const flat: PrunedNode = { role: "main", name: "", props: {}, children: [] };
     for (let i = 0; i < 40; i++) {
       flat.children.push({ role: "button", name: "编辑", props: {}, children: [] });
     }
-    const g = collapse(flat, { threshold: 3 }).children[0] as CollapsedGroup;
-    expect(g.count).toBe(40);
+    const result = collapse(flat, { threshold: 3 });
+    expect(result.children).toEqual(flat.children);
   });
 
   it("同一输入两次折叠产生相同的 groupId（可稳定引用）", () => {

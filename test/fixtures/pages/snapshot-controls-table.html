@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh">
+<head><meta charset="utf-8"><title>工具栏与订单表</title></head>
+<body>
+  <main>
+    <h1>订单管理</h1>
+    <div role="toolbar" aria-label="订单工具栏">
+      <button type="button" data-log="刷新">刷新</button>
+      <button type="button" data-log="新建订单">新建订单</button>
+      <button type="button" data-log="删除全部">删除全部</button>
+      <button type="button" data-log="导出">导出</button>
+      <button type="button" data-log="筛选">筛选</button>
+      <button type="button" data-log="设置">设置</button>
+    </div>
+    <table aria-label="订单">
+      <thead><tr><th>编号</th><th>客户</th><th>数量</th><th>金额</th><th>操作</th></tr></thead>
+      <tbody>
+        <tr><td>ORD-001</td><td>华东分公司</td><td>100</td><td>100</td><td>
+          <button type="button" data-log="ORD-001:查看">查看</button>
+          <button type="button" data-log="ORD-001:编辑">编辑</button>
+          <button type="button" data-log="ORD-001:删除">删除</button>
+        </td></tr>
+        <tr><td>ORD-002</td><td>西北分公司</td><td>100</td><td>100</td><td>
+          <button type="button" data-log="ORD-002:查看">查看</button>
+          <button type="button" data-log="ORD-002:编辑">编辑</button>
+          <button type="button" data-log="ORD-002:删除">删除</button>
+        </td></tr>
+        <tr><td>ORD-003</td><td>华南分公司</td><td>100</td><td>100</td><td>
+          <button type="button" data-log="ORD-003:查看">查看</button>
+          <button type="button" data-log="ORD-003:编辑">编辑</button>
+          <button type="button" data-log="ORD-003:删除">删除</button>
+        </td></tr>
+      </tbody>
+    </table>
+    <table aria-label="操作分栏">
+      <tbody><tr>
+        <td>资料<button type="button" data-log="分栏:预览">预览</button></td>
+        <td>账单<button type="button" data-log="分栏:下载">下载</button></td>
+        <td>记录<button type="button" data-log="分栏:归档">归档</button></td>
+      </tr></tbody>
+    </table>
+    <output id="click-log" aria-label="操作记录"></output>
+  </main>
+  <script>
+    document.querySelectorAll("button[data-log]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const log = document.getElementById("click-log");
+        log.textContent += (log.textContent ? "|" : "") + button.dataset.log;
+      });
+    });
+  </script>
+</body>
+</html>
