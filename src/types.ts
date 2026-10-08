@@ -157,7 +157,8 @@ export type FailureKind =
   | "assert-failed"
   | "navigation-failed"
   | "action-failed"
-  | "user-interrupted";
+  | "user-interrupted"
+  | "page-closed";
 
 export interface FailureContext {
   failedIndex: number;

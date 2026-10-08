@@ -3,9 +3,10 @@ import type { BrowserSession, PageHandle } from "../session/browser.js";
 import type { StepObserver } from "../executor/observer.js";
 import { NetworkTracker } from "../waiter/stability.js";
 import { DiagnosticsCollector } from "../diagnostics/collector.js";
-import type { RunRecord } from "../types.js";
+import type { RunRecord, Trace } from "../types.js";
+import { PageClosedError } from "../session/pageErrors.js";
 import { loadTrace } from "./store.js";
-import { replayTrace } from "./replay.js";
+import { replayTrace, pageClosedRecord } from "./replay.js";
 import { archiveRun } from "../report/archive.js";
 import type { AuthState } from "../session/auth.js";
 import { applyAuth } from "../session/auth.js";
@@ -45,6 +46,8 @@ export interface SuiteTraceResult {
   flaky?: boolean;
   /** 被用户打断（观察模式介入检测）：用户在场，不自动重试 */
   interrupted?: true;
+  /** 页面在准备或执行阶段关闭，不自动重试。 */
+  pageClosed?: true;
 }
 
 /** 用例级进度事件：首次失败即将重试发 retrying，最终结果发 done */
@@ -89,12 +92,15 @@ async function attemptOnce(
   suffix: string
 ): Promise<SuiteTraceResult> {
   const t0 = Date.now();
-  const { handle, release } = await opts.session.newIsolatedPage();
+  let resource: Awaited<ReturnType<BrowserSession["newIsolatedPage"]>> | undefined;
+  let trace: Trace | undefined;
   try {
+    trace = await loadTrace(path);
+    resource = await opts.session.newIsolatedPage();
+    const { handle } = resource;
     const tracker = await NetworkTracker.attach(handle);
     const collector = await DiagnosticsCollector.attach(handle);
     if (opts.auth) await applyAuth(handle, opts.auth);
-    const trace = await loadTrace(path);
     const rec = await replayTrace({
       handle, tracker, collector, trace, vars: opts.vars,
       slowMoMs: opts.slowMoMs, resolveRetryMs: opts.resolveRetryMs,
@@ -125,6 +131,15 @@ async function attemptOnce(
       attempts: suffix ? 2 : 1
     };
   } catch (err) {
+    if (trace && (err instanceof PageClosedError || resource?.handle.page.isClosed())) {
+      const message = err instanceof PageClosedError ? err.message : new PageClosedError(resource!.handle.pageId).message;
+      const record = pageClosedRecord(trace, message, t0);
+      await archiveRun({ traceName: trace.name, record, trace, rootDir: opts.runsDir, suffix });
+      return {
+        path, name: trace.name, ok: false, durationMs: Date.now() - t0,
+        stepCount: 0, driftCount: 0, record, pageClosed: true, attempts: suffix ? 2 : 1
+      };
+    }
     // 未预期异常兜底为单条失败：trace 读不出/Context 创建失败等，
     // 不得向上抛——一条的意外不能拖垮整批
     return {
@@ -134,7 +149,7 @@ async function attemptOnce(
       attempts: suffix ? 2 : 1
     };
   } finally {
-    await release();
+    await resource?.release();
   }
 }
 
@@ -150,6 +165,7 @@ async function runOne(opts: RunSuiteOptions, path: string): Promise<SuiteTraceRe
   if (first.ok) return done(first);
   // 用户在场才会被打断：重试大概率再被打断，如实报告即可
   if (isInterrupted(first)) return done({ ...first, interrupted: true });
+  if (first.pageClosed || first.record?.failure?.kind === "page-closed") return done(first);
   opts.onTraceEvent?.({ kind: "retrying", result: first });
   const second = await attemptOnce(opts, path, "-retry");
   return done({

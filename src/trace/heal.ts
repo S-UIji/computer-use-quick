@@ -6,7 +6,8 @@ import type {
 import { runBatch } from "../executor/batch.js";
 import { NetworkTracker } from "../waiter/stability.js";
 import { DiagnosticsCollector } from "../diagnostics/collector.js";
-import { replayTrace } from "./replay.js";
+import { replayTrace, pageClosedRecord } from "./replay.js";
+import { PageClosedError } from "../session/pageErrors.js";
 import { atomicWriteTrace, appendHealRecord } from "./store.js";
 import { applyAuth, type AuthState } from "../session/auth.js";
 
@@ -37,6 +38,12 @@ export function checkHealGate(opts: {
 }): HealGate {
   if (opts.lastFailureKind === undefined) {
     return { ok: false, reason: "该 trace 无失败记录，无法确认失败类型；请先 replay" };
+  }
+  if (opts.lastFailureKind === "page-closed") {
+    return {
+      ok: false,
+      reason: "上次运行的标签页已关闭，无需 heal_step；请恢复页面后重新 replay（未消耗自愈次数）"
+    };
   }
   if (opts.lastFailureKind === "user-interrupted") {
     return {
@@ -78,7 +85,7 @@ export function buildHealedTrace(
 
 /** 验证重放失败是否计入自愈预算：被用户打断不算——那不是修复本身的问题 */
 export function validationCountsAgainstBudget(validation: RunRecord): boolean {
-  return validation.failure?.kind !== "user-interrupted";
+  return validation.failure?.kind !== "user-interrupted" && validation.failure?.kind !== "page-closed";
 }
 
 export interface RunHealOptions {
@@ -128,9 +135,12 @@ export async function runHeal(opts: RunHealOptions): Promise<HealOutcome> {
 
   // 验证门：独立 BrowserContext 全量重放。不复用失败页（脏状态），
   // 也不与之共享 cookie/storage——探索痕迹进不了验证，验证过了才算真修好。
-  const { handle: vHandle, release } = await opts.session.newIsolatedPage();
+  let resource: Awaited<ReturnType<BrowserSession["newIsolatedPage"]>> | undefined;
   let validation: RunRecord;
+  const validationStarted = Date.now();
   try {
+    resource = await opts.session.newIsolatedPage();
+    const vHandle = resource.handle;
     const vTracker = await NetworkTracker.attach(vHandle);
     const vCollector = await DiagnosticsCollector.attach(vHandle);
     if (opts.auth) await applyAuth(vHandle, opts.auth);
@@ -141,8 +151,12 @@ export async function runHeal(opts: RunHealOptions): Promise<HealOutcome> {
       visual: { traceName: opts.trace.name, baselineRoot: opts.baselineRoot },
       observer: opts.validationObserverFor?.(vHandle)
     });
+  } catch (err) {
+    if (!(err instanceof PageClosedError) && !resource?.handle.page.isClosed()) throw err;
+    const message = err instanceof PageClosedError ? err.message : new PageClosedError(resource!.handle.pageId).message;
+    validation = pageClosedRecord(healed, message, validationStarted);
   } finally {
-    await release();
+    await resource?.release();
   }
 
   if (!validation.ok) {

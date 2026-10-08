@@ -2,6 +2,7 @@ import puppeteer, { type Browser, type Page, type CDPSession } from "puppeteer-c
 import { parseWatchSetting, resolveWatchEnabled } from "../watch/mode.js";
 import { removeAllOverlays } from "../watch/overlay.js";
 import { DialogGuard } from "./dialogs.js";
+import { PageClosedError, assertPageOpen } from "./pageErrors.js";
 import {
   BrowserUnavailableError, connectNotice, defaultProfileDir, describeConnectError, findChrome,
   isLocalBrowserUrl, launchChrome, renderGuidance, type LaunchOptions
@@ -48,6 +49,9 @@ export interface SessionOptions {
 export class BrowserSession {
   private handles = new Map<string, PageHandle>();
   private selected?: string;
+  private closedSelection?: string;
+  /** 只串行化取页/恢复，不串行化页面动作或套件运行。 */
+  private selecting: Promise<void> = Promise.resolve();
   private browserCdp?: CDPSession;
   private browser?: Browser;
   /** 并发调用共享同一次连接 */
@@ -126,6 +130,7 @@ export class BrowserSession {
   private resetBrowserState(): void {
     this.handles.clear();
     this.selected = undefined;
+    this.closedSelection = undefined;
     this.browserCdp = undefined;
   }
 
@@ -147,12 +152,23 @@ export class BrowserSession {
     this.browserCdp = browserCdp;
     await browserCdp.send("Target.setDiscoverTargets", { discover: true });
     browserCdp.on("Target.targetDestroyed", (e: { targetId: string }) => {
+      if (this.browser !== browser) return; // 忽略旧连接的迟到销毁事件
       const handle = this.handles.get(e.targetId);
-      if (!handle) return; // 未入表的 target（用户自己的标签页等）安全跳过
-      this.handles.delete(e.targetId);
-      if (this.selected === e.targetId) this.selected = undefined;
-      handle.cdp.detach().catch(() => {}); // 页面已死，detach 失败可安全忽略
+      this.forgetPage(e.targetId);
+      handle?.cdp.detach().catch(() => {}); // 页面已死，detach 失败可安全忽略
     });
+  }
+
+  private forgetPage(pageId: string): void {
+    this.handles.delete(pageId);
+    if (this.selected === pageId) {
+      this.closedSelection = pageId;
+      this.selected = undefined;
+    }
+  }
+
+  get needsPageRecovery(): boolean {
+    return this.closedSelection !== undefined;
   }
 
   /** 内部句柄表规模（测试可观测性锚点） */
@@ -167,6 +183,7 @@ export class BrowserSession {
 
   async listPages(): Promise<Array<{ pageId: string; title: string; url: string }>> {
     const browser = await this.ensureConnected();
+    const selectedAtStart = this.selected;
     const out: Array<{ pageId: string; title: string; url: string }> = [];
     // 标题取浏览器级 target 信息，不进页面求值：任何一个标签页开着 JS 弹窗，page.title() 都会挂住
     const infos = (await this.browserCdp?.send("Target.getTargets")) as
@@ -179,50 +196,88 @@ export class BrowserSession {
         out.push({ pageId: id, title: titles.get(id) ?? "", url: page.url() });
       }
     }
+    if (selectedAtStart && this.selected === selectedAtStart && !out.some((p) => p.pageId === selectedAtStart)) {
+      this.forgetPage(selectedAtStart);
+    }
     return out;
   }
 
-  /** 当前默认作用的页面 id。未显式选页时 getPage() 用的就是它（再兜底到第一个标签页） */
+  /** 当前默认页 id；关闭后为空，由 needsPageRecovery 区分首次取页。 */
   currentPageId(): string | undefined {
     return this.selected;
   }
 
   selectPage(pageId: string): void {
     this.selected = pageId;
+    this.closedSelection = undefined;
   }
 
   /** 装配 handle：CDP session + 弹窗守卫 + 三个 enable。三处建页路径共用。 */
   private async setupHandle(page: Page): Promise<PageHandle> {
     const key = targetIdOf(page);
+    if (page.isClosed()) throw new PageClosedError(key);
     const cached = this.handles.get(key);
     if (cached) return cached;
-    const cdp = await page.createCDPSession();
-    const handle: PageHandle = { pageId: key, page, cdp };
-    // 弹窗守卫最先装：页面上若已开着弹窗（如接管用户的标签页），后面的 enable 会被它挂住
-    const guard = await DialogGuard.install(handle);
-    await guard.settlePending();
-    await cdp.send("Accessibility.enable");
-    await cdp.send("DOM.enable");
-    await cdp.send("Runtime.enable");
-    this.handles.set(key, handle);
-    return handle;
+    let cdp: CDPSession | undefined;
+    try {
+      cdp = await page.createCDPSession();
+      const handle: PageHandle = { pageId: key, page, cdp };
+      // 弹窗守卫最先装，避免后续 enable 被既有弹窗挂住。
+      const guard = await DialogGuard.install(handle);
+      await guard.settlePending();
+      await cdp.send("Accessibility.enable");
+      await cdp.send("DOM.enable");
+      await cdp.send("Runtime.enable");
+      assertPageOpen(handle);
+      this.handles.set(key, handle);
+      return handle;
+    } catch (err) {
+      await cdp?.detach().catch(() => {});
+      if (page.isClosed()) throw new PageClosedError(key);
+      throw err;
+    }
   }
 
-  async getPage(pageId?: string): Promise<PageHandle> {
-    const browser = await this.ensureConnected();
-    const id = pageId ?? this.selected;
-    const pages = await browser.pages();
+  getPage(pageId?: string): Promise<PageHandle> {
+    const result = this.selecting.then(() => this.resolvePage(pageId));
+    this.selecting = result.then(() => {}, () => {});
+    return result;
+  }
 
-    let page: Page | undefined;
-    if (id) page = pages.find((p) => targetIdOf(p) === id);
-    page ??= pages[0];
+  private async resolvePage(pageId?: string): Promise<PageHandle> {
+    const browser = await this.ensureConnected();
+    const pages = (await browser.pages()).filter((p) => !p.isClosed());
+    const id = pageId ?? this.selected;
+    let page = id === undefined ? undefined : pages.find((p) => targetIdOf(p) === id);
+    // 包括空字符串在内，显式传入的 ID 都不能回退到别的页面。
+    if (pageId !== undefined && !page) {
+      throw new Error(`pageId「${pageId}」不存在或已关闭，请调用 list_pages 重新选择页面。`);
+    }
+    if (!page && this.selected) this.forgetPage(this.selected);
+    const closedPageId = this.closedSelection;
+    const recovering = pageId === undefined && closedPageId !== undefined;
+    if (!page) page = recovering ? await browser.newPage() : pages[0];
     if (!page) throw new Error("浏览器中没有可用页面");
 
-    const handle = await this.setupHandle(page);
-    // 两次调用之间弹出的窗会挂住本次调用的一切操作：取页即处理，记录留给工具返回报告
-    await DialogGuard.for(handle)?.settlePending();
-    this.selected ??= handle.pageId;
-    return handle;
+    try {
+      const handle = await this.setupHandle(page);
+      await DialogGuard.for(handle)?.settlePending();
+      assertPageOpen(handle);
+      this.selectPage(handle.pageId);
+      if (recovering) {
+        const recovered = `之前操作的标签页已关闭（pageId=${closedPageId}），已新开标签页（pageId=${handle.pageId}）；旧 ref 不再适用，请先 snapshot 确认。`;
+        this.notice = [this.notice, recovered].filter(Boolean).join("；");
+      }
+      return handle;
+    } catch (err) {
+      if (page.isClosed()) {
+        this.forgetPage(targetIdOf(page));
+        // 首次隐式取页在装配途中关闭，同样不能在下次接管别人的页面。
+        if (pageId === undefined) this.closedSelection ??= targetIdOf(page);
+        throw new PageClosedError(targetIdOf(page));
+      }
+      throw err;
+    }
   }
 
   /** 开一个新标签页并建立 handle。不改变当前选中页。 */
@@ -237,13 +292,18 @@ export class BrowserSession {
    */
   async newIsolatedPage(): Promise<{ handle: PageHandle; release: () => Promise<void> }> {
     const context = await (await this.ensureConnected()).createBrowserContext();
-    const handle = await this.setupHandle(await context.newPage());
+    let handle: PageHandle;
+    try {
+      handle = await this.setupHandle(await context.newPage());
+    } catch (err) {
+      await context.close().catch(() => {});
+      throw err;
+    }
     let released = false;
     const release = async (): Promise<void> => {
       if (released) return;
       released = true;
-      this.handles.delete(handle.pageId);
-      if (this.selected === handle.pageId) this.selected = undefined;
+      this.forgetPage(handle.pageId);
       await handle.cdp.detach().catch(() => {});
       await context.close().catch(() => {});
     };
@@ -254,8 +314,7 @@ export class BrowserSession {
   async closePage(pageId: string): Promise<void> {
     const handle = this.handles.get(pageId);
     if (!handle) return;
-    this.handles.delete(pageId);
-    if (this.selected === pageId) this.selected = undefined;
+    this.forgetPage(pageId);
     await handle.cdp.detach().catch(() => {});
     await handle.page.close().catch(() => {});
   }
@@ -271,6 +330,7 @@ export class BrowserSession {
     // 从未连上时什么都不做；先置空，断开事件到达时不会再清一遍
     const browser = this.browser;
     this.browser = undefined;
+    this.resetBrowserState();
     browser?.disconnect();
   }
 }

@@ -239,7 +239,7 @@ export function createServer(session: BrowserSession): McpServer {
     async () => {
       const pages = await session.listPages();
       const notice = notices(session);
-      const current = session.currentPageId() ?? pages[0]?.pageId;
+      const current = session.currentPageId() ?? (session.needsPageRecovery ? undefined : pages[0]?.pageId);
       const lines = pages.map((p) =>
         `${p.pageId === current ? "*" : " "} ${p.pageId}\n    ${p.title || "(无标题)"}\n    ${p.url}`
       );
@@ -515,6 +515,11 @@ export function createServer(session: BrowserSession): McpServer {
       }
 
       if (outcome.status === "validation-failed") {
+        if (outcome.validation.failure?.kind === "page-closed") {
+          return { isError: true, content: [{ type: "text" as const, text: notice +
+            "自愈验证的标签页已关闭，trace 未写回、未计自愈次数；恢复页面后重新运行。\n\n" +
+            renderRunRecord(outcome.validation) }] };
+        }
         if (!validationCountsAgainstBudget(outcome.validation)) {
           return { isError: true, content: [{ type: "text" as const, text: notice +
             `✋ 验证被用户打断（第 ${k + 1} 步的修复未能完成全量重放），trace 未写回、未计自愈次数，请重试。\n\n` +

@@ -66,6 +66,18 @@ Chrome 不在常见位置（或想用 Edge）时，用 `CUQ_CHROME_PATH` 指定�
 | `heal_step` | 回放失败后的自愈：演示修正步 → 独立 Context 全量重放验证 → 全绿才写回 trace。`assert-failed` 服务端拒修（可能是真 bug） |
 | `inspect` | 只在排查失败时用。取截图/console/网络 |
 
+## 标签页选择与关闭恢复
+
+`snapshot` / `batch` 等工具传入有效 `pageId` 时，该页成为默认操作页；
+传入不存在或已关闭的 ID 会返回错误，请先用 `list_pages` 重新选页。
+
+默认操作页被关闭后，下一次省略 `pageId` 的取页会新建空白标签页并告知新 ID，
+用户的其他标签页保持不变。旧 ref 不可复用，请先 `snapshot` 确认。
+只调用 `list_pages` 不会新开页，也不会把其他页标为默认页。
+
+执行中或收尾时页面关闭会报告 `page-closed`；套件不自动重试，
+回放不要求自愈。自愈验证页被关闭时不写回 trace、不扣预算，恢复页面后重新运行。
+
 ## 三种用法
 
 **探索式测试**：`snapshot` 看页面 → `batch` 执行一批 → 再 `snapshot` 确认 → 循环。
@@ -221,13 +233,13 @@ SIGTERM、Ctrl+C）或调用 `BrowserSession.close()` 时会先撤掉所有标�
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（52 个文件 / 402 个测试）
+npm test                  # 先 tsc 构建再跑全部（55 个文件 / 419 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```
 
-`test/integration/mcp-server.test.ts` 会把 `dist/index.js` 作为真实 MCP server
-拉起来走 stdio 协议对话——这是唯一覆盖工具注册与返回格式的测试，所以 `npm test`
+`test/integration/mcp-*.test.ts` 会把 `dist/index.js` 作为真实 MCP server
+拉起来走 stdio 协议对话，覆盖工具注册、返回格式和页面生命周期；所以 `npm test`
 会先 `tsc`，免得拿旧产物测出假绿。
 
 集成测试通过 vitest `globalSetup` **全套件共享一个 Chrome 实例**。

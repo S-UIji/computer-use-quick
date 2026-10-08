@@ -1,4 +1,5 @@
 import type { PageHandle } from "../session/browser.js";
+import { assertPageOpen } from "../session/pageErrors.js";
 import type { WaitCondition } from "../types.js";
 import { resolveTarget, LocatorError } from "../locator/resolve.js";
 import type { NetworkTracker } from "./stability.js";
@@ -69,7 +70,10 @@ export async function waitFor(
   };
 
   for (;;) {
-    if (await satisfied()) return;
+    assertPageOpen(handle);
+    const ready = await satisfied();
+    assertPageOpen(handle);
+    if (ready) return;
     if (Date.now() >= deadline) {
       const message = `等待条件 ${cond.type} 超时（${timeoutMs}ms）` +
         (last.message ? `：最后一次定位${last.message}` : "");

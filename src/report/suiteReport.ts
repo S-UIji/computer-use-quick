@@ -33,12 +33,19 @@ export function renderSuiteResult(r: SuiteResult): string {
   }
 
   // 被用户打断的不是页面问题，heal_step 也会拒修，不列入可自愈段
-  const failed = r.results.filter((t) => !t.ok && t.record && !t.interrupted);
+  const failed = r.results.filter((t) => !t.ok && t.record && !t.interrupted && !t.pageClosed && t.record.failure?.kind !== "page-closed");
   if (failed.length > 0) {
     lines.push("", "## 失败上下文（可接 heal_step 自愈）", "");
     for (const t of failed) {
       lines.push(`### ${t.name}`, "", renderRunRecord(t.record!), "");
     }
+  }
+
+  const closed = r.results.filter((t) => !t.ok && (t.pageClosed || t.record?.failure?.kind === "page-closed"));
+  if (closed.length > 0) {
+    lines.push("", "## 页面关闭 page-closed（未自动重试，无需 heal_step）", "");
+    for (const t of closed) lines.push(`### ${t.name}`, "", renderRunRecord(t.record!), "");
+    lines.push("请恢复页面后重新运行。", "");
   }
 
   if (r.results.some((t) => t.interrupted)) {

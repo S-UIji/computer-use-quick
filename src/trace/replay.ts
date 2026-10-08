@@ -62,6 +62,18 @@ function remapObserver(obs: StepObserver, realIndex: number[], total: number): S
   };
 }
 
+/** 页面在准备阶段关闭，还未执行任何步骤；同样生成不可自愈的失败台账。 */
+export function pageClosedRecord(trace: Trace, message: string, startedAt: number): RunRecord {
+  return {
+    traceName: trace.name, startedAt: new Date(startedAt).toISOString(),
+    durationMs: Date.now() - startedAt, ok: false, steps: [], drifts: [], healRequired: false,
+    failure: trace.steps[0] ? {
+      failedIndex: 0, failedStep: trace.steps[0], kind: "page-closed", message,
+      snapshot: "（标签页已关闭，无法获取快照）", consoleErrors: [], failedRequests: []
+    } : undefined
+  };
+}
+
 export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
   const startedAt = new Date().toISOString();
   const t0 = Date.now();
@@ -124,8 +136,8 @@ export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
     steps: realResults,
     drifts,
     failure,
-    // 被用户打断不是页面问题，不进自愈流程
-    healRequired: !r.ok && failure?.kind !== "user-interrupted",
+    // 用户介入或页面关闭不应修改 trace。
+    healRequired: !r.ok && failure?.kind !== "user-interrupted" && failure?.kind !== "page-closed",
     artifacts: r.artifacts.length > 0 ? r.artifacts : undefined
   };
 }

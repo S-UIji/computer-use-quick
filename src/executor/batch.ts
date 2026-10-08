@@ -1,4 +1,5 @@
 import type { PageHandle } from "../session/browser.js";
+import { PageClosedError, assertPageOpen } from "../session/pageErrors.js";
 import type { NetworkTracker } from "../waiter/stability.js";
 import type { DiagnosticsCollector } from "../diagnostics/collector.js";
 import type { FailureContext, FailureKind, RunArtifact, Step, StepResult, VisualOptions } from "../types.js";
@@ -44,11 +45,14 @@ export interface BatchResult {
   failure?: FailureContext;
 }
 
-function classify(err: unknown): {
+function classify(err: unknown, handle: PageHandle): {
   kind: FailureKind;
   message: string;
   candidates?: string[];
 } {
+  if (err instanceof PageClosedError || handle.page.isClosed()) {
+    return { kind: "page-closed", message: new PageClosedError(handle.pageId).message };
+  }
   if (err instanceof LocatorError) {
     return { kind: err.kind, message: err.message, candidates: err.candidates };
   }
@@ -150,6 +154,7 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
     await obs?.onStepStart(i, raw);
 
     try {
+      assertPageOpen(opts.handle);
       const step = interpolateStep(raw, ctx.vars);
       dialogs?.setStep(step);
       // ref 是单次快照内的短期句柄，不能进 trace，要固化成长期 descriptor。
@@ -188,6 +193,7 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
       } else {
         await runAction(ctx, step);
       }
+      assertPageOpen(opts.handle);
       ctx.onResolved = undefined;
       if (ctx.lastWaitTimedOut) {
         // 打满上限不抛错是设计（等不到静默不耽误干活），但这笔开销必须显形——
@@ -260,8 +266,9 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
       }
     } catch (err) {
       ctx.onResolved = undefined;
-      const c = classify(err);
-      const interruption = obs?.takeInterruption();
+      const c = classify(err, opts.handle);
+      const detected = obs?.takeInterruption();
+      const interruption = c.kind === "page-closed" ? undefined : detected;
       obs?.takeScrollCount(); // 失败即结束，滚动计数一并清掉
       const kind: FailureKind = interruption ? "user-interrupted" : c.kind;
       const baseMessage = interruption
@@ -281,7 +288,24 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
     }
   }
 
-  const final = await takeSnapshot(opts.handle);
+  let final: Awaited<ReturnType<typeof takeSnapshot>>;
+  try {
+    assertPageOpen(opts.handle);
+    final = await takeSnapshot(opts.handle);
+    assertPageOpen(opts.handle);
+  } catch (err) {
+    const c = classify(err, opts.handle);
+    if (c.kind !== "page-closed" || opts.steps.length === 0) throw err;
+    const index = opts.steps.length - 1;
+    const last = results[results.length - 1];
+    if (last) {
+      last.ok = false;
+      last.error = c.message;
+    }
+    const failure = await failureAt(opts, index, opts.steps[index], c.kind, c.message);
+    await obs?.onRunEnd({ ok: false, failedIndex: index, interrupted: false });
+    return fail(failure);
+  }
   opts.refs.clear();
   for (const [k, v] of final.refs) opts.refs.set(k, v);
   // 最后一步结束到收尾快照之间弹出的窗（如定时 alert）记到最后一步上
