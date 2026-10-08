@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import type { WindowSlot } from "../session/windowLayout.js";
 import type { BrowserSession, PageHandle } from "../session/browser.js";
 import type { StepObserver } from "../executor/observer.js";
 import { NetworkTracker } from "../waiter/stability.js";
@@ -98,7 +99,8 @@ async function attemptOnce(
   opts: RunSuiteOptions,
   path: string,
   suffix: string,
-  prepared: PreparedTrace
+  prepared: PreparedTrace,
+  slot: WindowSlot
 ): Promise<SuiteTraceResult> {
   const t0 = Date.now();
   let resource: Awaited<ReturnType<BrowserSession["newIsolatedPage"]>> | undefined;
@@ -109,7 +111,7 @@ async function attemptOnce(
     const snapshot = prepared.value;
     trace = snapshot.trace;
     traceFingerprint = snapshot.fingerprint;
-    resource = await opts.session.newIsolatedPage();
+    resource = await opts.session.newIsolatedPage(slot);
     const { handle } = resource;
     const tracker = await NetworkTracker.attach(handle);
     const collector = await DiagnosticsCollector.attach(handle);
@@ -169,18 +171,18 @@ async function attemptOnce(
 const isInterrupted = (r: SuiteTraceResult): boolean => r.record?.failure?.kind === "user-interrupted";
 
 /** 单条运行：失败则用全新 Context 完整重跑 1 次，以最终结果为准；被用户打断不重试 */
-async function runOne(opts: RunSuiteOptions, path: string, prepared: PreparedTrace): Promise<SuiteTraceResult> {
+async function runOne(opts: RunSuiteOptions, path: string, prepared: PreparedTrace, slot: WindowSlot): Promise<SuiteTraceResult> {
   const done = (r: SuiteTraceResult): SuiteTraceResult => {
     opts.onTraceEvent?.({ kind: "done", result: r });
     return r;
   };
-  const first = await attemptOnce(opts, path, "", prepared);
+  const first = await attemptOnce(opts, path, "", prepared, slot);
   if (first.ok) return done(first);
   // 用户在场才会被打断：重试大概率再被打断，如实报告即可
   if (isInterrupted(first)) return done({ ...first, interrupted: true });
   if (first.pageClosed || first.record?.failure?.kind === "page-closed") return done(first);
   opts.onTraceEvent?.({ kind: "retrying", result: first });
-  const second = await attemptOnce(opts, path, "-retry", prepared);
+  const second = await attemptOnce(opts, path, "-retry", prepared, slot);
   return done({
     ...second,
     flaky: second.ok || undefined,
@@ -220,17 +222,18 @@ export async function runSuite(opts: RunSuiteOptions): Promise<SuiteResult> {
   const results: SuiteTraceResult[] = new Array(opts.paths.length);
   let next = 0;
 
-  const worker = async (): Promise<void> => {
+  const workerCount = Math.min(opts.concurrency, opts.paths.length);
+  const worker = async (index: number): Promise<void> => {
     for (;;) {
       const i = next++;
       if (i >= opts.paths.length) return;
-      results[i] = await runOne(opts, opts.paths[i], prepared[i]);
+      results[i] = await runOne(opts, opts.paths[i], prepared[i], { index, of: workerCount });
     }
   };
 
   const workers: Promise<void>[] = [];
-  for (let w = 0; w < Math.min(opts.concurrency, opts.paths.length); w++) {
-    workers.push(worker());
+  for (let w = 0; w < workerCount; w++) {
+    workers.push(worker(w));
   }
   await Promise.all(workers);
 

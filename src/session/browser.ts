@@ -1,6 +1,7 @@
 import puppeteer, { type Browser, type Page, type CDPSession } from "puppeteer-core";
 import { parseWatchSetting, resolveWatchEnabled } from "../watch/mode.js";
 import { removeAllOverlays } from "../watch/overlay.js";
+import { tileWindow, type WindowSlot, type WindowArea } from "./windowLayout.js";
 import { DialogGuard } from "./dialogs.js";
 import { PageClosedError, assertPageOpen } from "./pageErrors.js";
 import {
@@ -39,6 +40,10 @@ async function detectWatch(browser: Browser): Promise<boolean> {
   }
 }
 
+function isHeadlessShell(executable: string): boolean {
+  return /(?:^|[\\/])(?:chrome-headless-shell|headless_shell)(?:\.exe)?$/i.test(executable);
+}
+
 export interface SessionOptions {
   /** 观察模式显式开关；省略则每次连接时按 CUQ_WATCH 与浏览器 UA 判定 */
   watch?: boolean;
@@ -57,6 +62,8 @@ export class BrowserSession {
   /** 并发调用共享同一次连接 */
   private connecting?: Promise<Browser>;
   private watch = false;
+  private tileEnabled = false;
+  private layoutGroup?: { users: number; area?: Promise<WindowArea> };
   private everConnected = false;
   private notice?: string;
   /** 本会话自动拉起的 Chrome 进程号（诊断与测试用；服务端退出不关它） */
@@ -122,6 +129,22 @@ export class BrowserSession {
     });
     this.watch = this.opts.watch ?? await detectWatch(browser);
     await this.watchTargets(browser);
+    if (this.watch) {
+      // UA 可被 --user-agent 覆盖；从真实启动参数判断，无法确认时跳过布局。
+      try {
+        const command = await this.browserCdp!.send("Browser.getBrowserCommandLine");
+        this.tileEnabled = command.arguments.length > 0 && !isHeadlessShell(command.arguments[0]) && !command.arguments.some((arg) => arg === "--headless" || arg.startsWith("--headless="));
+      } catch {
+        try {
+          const info = await this.browserCdp!.send("SystemInfo.getInfo");
+          const executable = info.commandLine.match(/^(?:"([^"]+)"|(\S+))/)?.slice(1).find(Boolean) ?? "";
+          this.tileEnabled = !!info.commandLine && !isHeadlessShell(executable) && !/(?:^|[\s"'])--headless(?:[=\s"']|$)/.test(info.commandLine);
+        } catch {
+          this.tileEnabled = false;
+          console.error("[computer-use-quick] 无法确认有头浏览器，窗口平铺不启用");
+        }
+      }
+    }
     this.notice = connectNotice(this.everConnected, launchedProfile);
     this.everConnected = true;
     return browser;
@@ -132,6 +155,8 @@ export class BrowserSession {
     this.selected = undefined;
     this.closedSelection = undefined;
     this.browserCdp = undefined;
+    this.tileEnabled = false;
+    this.layoutGroup = undefined;
   }
 
   private unavailable(reason: string, launchError?: string): BrowserUnavailableError {
@@ -285,18 +310,57 @@ export class BrowserSession {
     return this.setupHandle(await (await this.ensureConnected()).newPage());
   }
 
+  /** 平铺只触碰新窗口；所有窗口管理异常均不影响执行。 */
+  private async placeIsolatedWindow(handle: PageHandle, slot: WindowSlot, existing: Set<number>, group: NonNullable<BrowserSession["layoutGroup"]>): Promise<void> {
+    try {
+      const cdp = this.browserCdp!;
+      const { windowId } = await cdp.send("Browser.getWindowForTarget", { targetId: handle.pageId });
+      if (existing.has(windowId)) throw new Error("隔离页未创建独立窗口，保护已有窗口");
+      const area = await (group.area ??= handle.page.evaluate(() => {
+        const available = screen as Screen & { availLeft: number; availTop: number };
+        return { left: available.availLeft, top: available.availTop, width: available.availWidth, height: available.availHeight };
+      }));
+      const bounds = tileWindow(area, slot);
+      if (!bounds) throw new Error("槽位无效或屏幕可用区域不足");
+      await cdp.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } });
+      await cdp.send("Browser.setWindowBounds", { windowId, bounds });
+    } catch (err) {
+      console.error("[computer-use-quick] 窗口平铺未生效：" + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
   /**
    * 开一个隔离页面：独立 BrowserContext + 页面，与日常页面零共享
    * cookie/storage（二期并行的隔离单元；heal 验证门也用它防探索痕迹污染）。
    * release 即销毁整个 Context（连带页面），可重复调用。
    */
-  async newIsolatedPage(): Promise<{ handle: PageHandle; release: () => Promise<void> }> {
-    const context = await (await this.ensureConnected()).createBrowserContext();
+  async newIsolatedPage(slot?: WindowSlot): Promise<{ handle: PageHandle; release: () => Promise<void> }> {
+    const browser = await this.ensureConnected();
+    const group = slot && this.tileEnabled ? (this.layoutGroup ??= { users: 0 }) : undefined;
+    if (group) group.users++;
+    const leaveGroup = (): void => {
+      if (group && --group.users === 0 && this.layoutGroup === group) this.layoutGroup = undefined;
+    };
+    let existing: Set<number> | undefined;
+    if (slot && this.tileEnabled && this.browserCdp) {
+      try {
+        const windows = await Promise.all((await browser.pages()).map(async (page) =>
+          (await this.browserCdp!.send("Browser.getWindowForTarget", { targetId: targetIdOf(page) })).windowId));
+        existing = new Set(windows);
+      } catch (err) {
+        console.error("[computer-use-quick] 无法确认已有窗口，跳过平铺：" + (err instanceof Error ? err.message : String(err)));
+      }
+    }
+    let context;
+    try { context = await browser.createBrowserContext(); }
+    catch (err) { leaveGroup(); throw err; }
     let handle: PageHandle;
     try {
       handle = await this.setupHandle(await context.newPage());
+      if (slot && existing && group) await this.placeIsolatedWindow(handle, slot, existing, group);
     } catch (err) {
       await context.close().catch(() => {});
+      leaveGroup();
       throw err;
     }
     let released = false;
@@ -306,6 +370,7 @@ export class BrowserSession {
       this.forgetPage(handle.pageId);
       await handle.cdp.detach().catch(() => {});
       await context.close().catch(() => {});
+      leaveGroup();
     };
     return { handle, release };
   }

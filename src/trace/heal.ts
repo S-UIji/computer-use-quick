@@ -183,7 +183,7 @@ export async function runMultiHeal(opts: RunMultiHealOptions): Promise<PlannedHe
   let validation: RunRecord;
   const validationStarted = Date.now();
   try {
-    resource = await opts.session.newIsolatedPage();
+    resource = await opts.session.newIsolatedPage({ index: 1, of: 2 });
     const vHandle = resource.handle;
     const vTracker = await NetworkTracker.attach(vHandle);
     const vCollector = await DiagnosticsCollector.attach(vHandle);

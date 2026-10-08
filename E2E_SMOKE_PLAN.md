@@ -222,6 +222,16 @@ node scripts/e2e-smoke.mjs
 - 两轮有头 MCP 角标、进度和保存回放均标明密码目标而不显示填写值，截图已核对；独立代码复审无 Critical/Important。
 - 证据：.scratch/r11-full-final.log、r11-review-final.log、r11-headed-final.log、r11-evidence/result.json 与截图。专属浏览器和临时资源已清理。
 
+## R13 隔离窗口平铺验收（2026-10-08）
+
+- 有头观察按稳定 worker 槽位布局；存活窗口共享可用屏幕区域，重试沿用槽位，自愈验证放右半屏。保护已有窗口，屏幕不足或管理不可用时诊断回退。
+- 真实启动参数及 shell 可执行程序保护 headless，覆盖普通 UA、独立 shell 和 SystemInfo 参数回退。
+- 最终全量 73 文件 / 598 测试全绿，350.22s；最终定向 3 文件 / 19 测试通过，独立复审无 Critical/Important。
+- 两轮有头真实 MCP 均检查三/八并发无重叠、重试槽位、自愈右半屏和原窗口边界不变；全部 Context 释放。默认真实视口截图已查看。
+- 两轮 headless 隔离闭环冒烟通过：SUITE_RESULT ok=2 failed=0 total=2 wall_ms=2402；SUITE_RESULT ok=2 failed=0 total=2 wall_ms=2592。专属进程与临时 profile 已核对清理，ci-env 不再存在。
+- 截图记录一项后续 UI 改善：窄窗口执行态角标遮住部分标题，长导航文案省略；本次未修改执行态角标。
+- 证据：.scratch/r13-full-final.log、r13-final-targeted.log、r13-headed-final.log、r13-smoke.log、r13-evidence/result.json、command-fallback.json 和各轮截图。
+
 ## 每次修复的验收门槛
 
 - 相关单元/集成测试全绿。

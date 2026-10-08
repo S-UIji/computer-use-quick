@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, inject } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, inject, vi } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,6 +46,13 @@ describe("runSuite 与介入", () => {
     expect(t.attempts).toBe(1);
     expect(t.record?.failure?.kind).toBe("user-interrupted");
     expect(events).toEqual(["done:two-steps"]);
+  });
+
+  it("并发worker槽位固定，失败重试沿用，headless不调整窗口",async()=>{
+    const paths=await Promise.all([writeTrace("slot-fail",[{action:"navigate",url:"/form.html"},{action:"assert",type:"url-contains",expected:"missing-r13"}]),writeTrace("slot-ok",[{action:"sleep",ms:100}]),writeTrace("slot-next",[{action:"sleep",ms:50}])]);
+    const original=session.newIsolatedPage.bind(session);const slots:unknown[]=[];
+    const spy=vi.spyOn(session,"newIsolatedPage").mockImplementation(async(slot)=>{slots.push(slot);return original(slot)});
+    try{const result=await runSuite({session,paths,vars:{},concurrency:2,runsDir:join(dir,"slot-runs")});expect(result.results[0].attempts).toBe(2);expect(result.ok).toBe(2);expect(slots).toEqual([{index:0,of:2},{index:1,of:2},{index:1,of:2},{index:0,of:2}]);}finally{spy.mockRestore()}
   });
 
   it("普通失败照常重试一次：先发 retrying 再发 done", async () => {
