@@ -1,10 +1,12 @@
+import { readPageContext, renderPageContext } from "./session/pageContext.js";
+import { validateStepsInput, validateStepInput, StepValidationError } from "./executor/stepValidation.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { BrowserSession, PageHandle } from "./session/browser.js";
 import { DialogGuard, describeDialog } from "./session/dialogs.js";
-import { failureUrlNotice, pageChangeNotice } from "./session/pageUrl.js";
+import { pageChangeNotice } from "./session/pageUrl.js";
 import type { RunRecord, Step, FailureKind } from "./types.js";
 import { takeSnapshot } from "./perception/snapshot.js";
 import { diffLines, renderDiff } from "./perception/diff.js";
@@ -191,7 +193,7 @@ export function createServer(session: BrowserSession): McpServer {
         "\"containerText\":\"教育事业群\",\"role\":\"button\",\"name\":\"查看在岗干部明细\"}],\"framePath\":[]}}。",
       inputSchema: {
         pageId: z.string().optional(),
-        steps: z.array(z.record(z.any())).min(1).describe("步骤数组，见 description"),
+        steps: z.array(z.unknown()).min(1).describe("步骤数组，见 description"),
         vars: z.record(z.string()).optional()
           .describe("变量表，供 ${VAR} 插值；凭证从这里传，不要写进步骤字面量"),
         resolveRetryMs: z.number().int().min(0).optional()
@@ -209,6 +211,11 @@ export function createServer(session: BrowserSession): McpServer {
       }
     },
     async ({ pageId, steps, vars, stability, resolveRetryMs }, extra) => {
+      try { validateStepsInput(steps); }
+      catch (error) {
+        if (!(error instanceof StepValidationError)) throw error;
+        return { isError: true, content: [{ type: "text" as const, text: error.message }] };
+      }
       const variableState = resolveVariables(vars);
       const variableCheck = inspectVariables(steps as Step[], variableState.values, variableState.environmentNames);
       let redact = createVariableRedactor(variableState.values, variableCheck.environmentUsed);
@@ -236,6 +243,9 @@ export function createServer(session: BrowserSession): McpServer {
       if (r.refLabels) refLabelTables.set(handle.pageId, r.refLabels);
       // 成功与步骤失败都已把现场返回给调用方，以批次终态作为下一次比较基线。
       observedUrls.set(handle.pageId, handle.page.url());
+      const pageRedact = createVariableRedactor(variableState.values,
+        [...variableCheck.environmentUsed, ...Object.keys(vars ?? {})], r.variableRedactions);
+      const pageContext = renderPageContext(await readPageContext(handle), pageRedact);
 
       if (r.ok) {
         const total = r.results.reduce((a, s) => a + s.durationMs, 0);
@@ -246,7 +256,7 @@ export function createServer(session: BrowserSession): McpServer {
         return { content: [{ type: "text" as const, text: notice +
           `✅ ${r.results.length} 步全部成功（合计 ${total}ms）\n` +
           (warnings.length ? `\n⚠ ${warnings.join("\n⚠ ")}\n` : "") +
-          `\n## 执行后快照\n${redactVariableSnapshot(r.snapshot, redact)}` }] };
+          "\n" + pageContext + `## 执行后快照\n${redactVariableSnapshot(r.snapshot, redact)}` }] };
       }
 
       const f = redactVariableFailure(r.failure!, redact);
@@ -257,7 +267,7 @@ export function createServer(session: BrowserSession): McpServer {
       return { isError: true, content: [{ type: "text" as const, text: notice +
         `${head}\n${f.message}\n\n` +
         interruptionRecovery(f, "batch") +
-        failureUrlNotice(f) +
+        pageContext +
         (watch.setupWarning ? `⚠ ${watch.setupWarning}\n\n` : "") +
         `## 失败步骤\n${JSON.stringify(f.failedStep, null, 2)}\n\n` +
         (f.candidates?.length ? `## 同容器内的其它文字（可用于消歧）\n${f.candidates.join("\n")}\n\n` : "") +
@@ -477,14 +487,14 @@ export function createServer(session: BrowserSession): McpServer {
         "已通过修复不为后续原步骤失败扣次数。页面关闭、用户打断和演示失败不计。",
       inputSchema: {
         tracePath: z.string().describe("trace 文件路径，与 replay 相同"),
-        actions: z.array(z.record(z.any())).min(1).max(3).optional()
+        actions: z.array(z.unknown()).min(1).max(3).optional()
           .describe("单点演示的 1~3 步，target 可用 snapshot 返回的 ref"),
-        step: z.record(z.any()).optional().describe("单点手写完整步骤，目标用稳定 descriptor"),
+        step: z.unknown().optional().describe("单点手写完整步骤，目标用稳定 descriptor"),
         stepIndex: z.number().int().min(0).optional()
           .describe("单点修复的原文件 0-based 步号；省略用最近 replay 失败步"),
         repairs: z.array(z.object({
           stepIndex: z.number().int().min(0),
-          steps: z.array(z.record(z.any())).min(1).max(3)
+          steps: z.array(z.unknown()).min(1).max(3)
         }).strict()).min(1).max(3).optional()
           .describe("同时替换原文件的 1~3 处步骤；所有目标必须为稳定 descriptor，禁止 ref"),
         dryRun: z.boolean().optional().describe("只验证，不写回、不追加审计、不消耗或清除预算"),
@@ -502,6 +512,11 @@ export function createServer(session: BrowserSession): McpServer {
         if ([actions, step, repairs].filter((value) => value !== undefined).length !== 1 ||
             (repairs !== undefined && stepIndex !== undefined)) {
           return fail("actions、step 与 repairs 必须且只能提供一个；repairs 与顶层 stepIndex 互斥。");
+        }
+        if (actions !== undefined) validateStepsInput(actions);
+        if (step !== undefined) validateStepInput(step, "修复步骤");
+        if (repairs !== undefined) {
+          for (const repair of repairs) validateStepsInput(repair.steps);
         }
         const { trace, fingerprint } = await loadTraceSnapshot(tracePath);
         const lastRun = lastRunByTrace.get(tracePath);

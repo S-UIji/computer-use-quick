@@ -17,6 +17,7 @@ import { buildDescriptor } from "../locator/descriptor.js";
 import { isPlaintextSecret } from "../trace/store.js";
 import { BackgroundScreenshotError } from "../watch/overlay.js";
 import { DialogGuard, describeDialog } from "../session/dialogs.js";
+import { validateStepsInput } from "./stepValidation.js";
 
 export interface BatchOptions {
   handle: PageHandle;
@@ -124,6 +125,7 @@ async function failureAt(
 }
 
 export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
+  validateStepsInput(opts.steps, true);
   // 执行期间弹出的 JS 弹窗立即按策略处理，否则页面上的一切 CDP 调用都会挂住
   const dialogs = DialogGuard.for(opts.handle);
   dialogs?.arm();

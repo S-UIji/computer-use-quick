@@ -268,6 +268,29 @@ node scripts/e2e-smoke.mjs
 
 证据：.scratch/r16-full-final.log、r16-review-green.log、r16-contracts-green.log、r16-report-green-singleton-path.log、r16-smoke.log及.scratch/r16-evidence/qa-report-latest.md、final-audit-latest.json、build-cleanup-proof-latest.json。详细报告：docs/r16-suite-feedback-fix-2026-10-09.md。
 
+## R17 输入校验、诊断与页面身份验收（2026-10-09）
+
+1. 在真实 MCP / stdio 下重现自动 favicon 404 双通道噪音、坏末步前缀提交、成功 batch 无页面身份。
+2. 逐项验证错误动作/字段/嵌套结构：中文步号及字段可读，非法值不回显；29 种坏 batch 末步均零导航、零 POST、零选页变化、零已记录步骤污染。正确重试只提交一次。
+3. 非法磁盘 trace、JSON 与修复步骤必须在隔离页/演示/写入前拒绝，保留原文件和预算；合法 ref/descriptor、插值、空填写值及透传参数兼容。
+4. 自动标准图标明确 404 才过滤；应用 console、业务 Fetch/API、图标 500 和无法确认来源的错误保留。
+5. 成功/失败、重定向、SPA、空标题、HTML 实体、URL 形状标题、SVG 标题、敏感 URL/变量均核对页面身份；未知标题不可伪造为浏览器地址回退。
+6. 独立连接的新冷页持有真实 alert，已缓存后台目标仍执行；同页 held alert 单独用真实已编译 helper 检查 200ms 标题预算及降级，不把它冒称 SDK 黑盒。
+7. 回归后台输入/截图保护、prompt 导航、可信 CDP 介入与恢复、关闭、R16 诊断合并、真实副作用及自愈预算门。
+
+验收结果：
+
+- 最终完整 npm test：87 文件 / 842 测试通过，退出码 0，367.27s；较基线增加 152 项。独立复审无 Critical/Important/Minor。
+- 两轮最新有头 Chrome154 各 186/186 通过，每轮 89 次真实 SDK 工具调用和 1 次独立元信息 helper 探针；各 39 个本地 HTTP 请求（35 GET / 4 意图 POST）。
+- 外来冷页 alert 期间缓存目标 batch 分别 120/109ms 完成，alert 仍开；同页标题读取超时明确不可获取。Context 最终 0，专属 MCP/Chrome/HTTP/profile 已核验清理，主代理查看两轮中断及最终用户页截图。
+- 运行条件：离屏 normal 专属窗口 2100,100,1100×800。可信介入来自外部 CDP，不等于人工 OS 鼠标；Claude 实际 UI、其他应用焦点、外部约63秒现场仍未验。
+- 早期失败及调查保留：after-1/2/4 含 QA 对既有 API 的错误假设；after-2 还暴露真实冷页枚举阻塞，独立 CDP 时间线定位后缓存路径先 RED 再 GREEN。只把 after-5/6 计为最终通过轮。
+- headless 两轮均由初次 1 成功/1 失败，经 heal 后复跑 2 成功/0 失败，终判 2436/2510ms；E2E_SMOKE_RESULT ok=2 failed=0 rounds=2，退出码0，PID/profile/ci-env核验清理。
+- 三项新规范同步；全部主规范严格校验 24/24。旧 screenshot-assert 仅补充过短的 Purpose，无行为变更。
+- 首次连接、未缓存目标及全局列页仍可能被外来冷页弹窗阻塞，留给整体截止时间/初始化治理；200ms 仅约束 DOM 标题读取，不能当成整步硬超时。图标过滤按明确证据保守执行。
+
+证据：.scratch/r17-final-full.log、r17-cached-red.log、r17-cached-green.log、r17-cached-regressions.log、r17-title-complete-green.log、r17-smoke.log、r17-smoke-wrapper.log、r17-main-spec-validation-final.log；.scratch/r17-evidence/after-5/ 与 after-6/ 的 evidence.json、原始 CDP/stdio 和截图。详细报告：docs/r17-tool-feedback-fix-2026-10-09.md；剩余清单：docs/remaining-work-2026-10-09.md。
+
 ## 每次修复的验收门槛
 
 - 相关单元/集成测试全绿。

@@ -2,6 +2,7 @@ import { writeFile, readFile, mkdir, appendFile, rename, rm, realpath } from "no
 import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import type { Trace, Step, HealSidecarRecord } from "../types.js";
+import { validateStepsInput } from "../executor/stepValidation.js";
 
 /** 定位信息里出现这些字样即视为凭证字段。中文词不能少：中文系统的密码框标签就是「密码」 */
 const SECRET_HINT = /(password|passwd|pwd|secret|token|credential|apikey|api_key|密码|口令|密钥|秘钥|令牌)/i;
@@ -21,13 +22,14 @@ export function isPlaintextSecret(step: Step): boolean {
 }
 
 export function assertNoSecrets(trace: Trace): void {
+  validateStepsInput(trace.steps, true);
   for (const [i, step] of trace.steps.entries()) {
     const direct = (step as { target?: { ref?: string } }).target;
     const nested = step.action === "wait" && "target" in step.until ? step.until.target : undefined;
     const t = [direct, nested].find((target) => target && "ref" in target);
     if (t && "ref" in t) {
       throw new Error(
-        `第 ${i + 1} 步仍在使用 ref「${t.ref}」。ref 只在单次快照内有效，不能写进 trace——` +
+        `第 ${i + 1} 步仍在使用 ref。ref 只在单次快照内有效，不能写进 trace——` +
         `请在保存前把它固化为 descriptor。`
       );
     }
@@ -61,13 +63,19 @@ export function traceFingerprint(content: string): string {
 /** 同一次读取提供执行内容与原始文件指纹，避免证据绑定到别的版本。 */
 export async function loadTraceSnapshot(path: string): Promise<{ trace: Trace; fingerprint: string }> {
   const content = await readFile(path, "utf8");
-  const parsed = JSON.parse(content) as Partial<Trace>;
-  if (!Array.isArray(parsed.steps)) {
+  let parsed: Partial<Trace>;
+  try { parsed = JSON.parse(content) as Partial<Trace>; }
+  catch (error) {
+    if (error instanceof SyntaxError) throw new Error("trace 不是合法 JSON：JSON 格式不正确");
+    throw error;
+  }
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.steps)) {
     throw new Error(`${path} 不是合法 trace：缺少 steps 数组`);
   }
   if (typeof parsed.name !== "string" || typeof parsed.baseUrl !== "string") {
     throw new Error(`${path} 不是合法 trace：缺少 name 或 baseUrl`);
   }
+  validateStepsInput(parsed.steps, true);
   return {
     fingerprint: traceFingerprint(content),
     trace: {

@@ -270,8 +270,12 @@ export class BrowserSession {
 
   private async resolvePage(pageId?: string): Promise<PageHandle> {
     const browser = await this.ensureConnected();
-    const pages = (await browser.pages()).filter((p) => !p.isClosed());
     const id = pageId ?? this.selected;
+    const cached = id === undefined ? undefined : this.handles.get(id);
+    // 已知目标不枚举其它页：外来冷页的 Puppeteer 初始化可能被它自己的弹窗阻塞。
+    const pages = cached && !cached.page.isClosed()
+      ? [cached.page]
+      : (await browser.pages()).filter((p) => !p.isClosed());
     let page = id === undefined ? undefined : pages.find((p) => targetIdOf(p) === id);
     // 包括空字符串在内，显式传入的 ID 都不能回退到别的页面。
     if (pageId !== undefined && !page) {

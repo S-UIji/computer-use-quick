@@ -125,7 +125,9 @@ describe("atomicWriteTrace", () => {
       { action: "click", target: { descriptor: {
         strategies: [{ kind: "role-name", role: "button", name: "旧按钮" }], framePath: []
       } } },
-      { action: "assert", type: "visible" }
+      { action: "assert", type: "visible", target: { descriptor: {
+        strategies: [{ kind: "css", value: "#result" }], framePath: []
+      } } }
     ]
   };
 
@@ -153,7 +155,9 @@ describe("atomicWriteTrace", () => {
   it("写回后目录里不残留临时文件", async () => {
     const d = await tmp();
     const p = await saveTrace(d, trace);
-    await atomicWriteTrace(p, buildHealedTrace(trace, 2, [{ action: "assert", type: "hidden" }]));
+    await atomicWriteTrace(p, buildHealedTrace(trace, 2, [{ action: "assert", type: "hidden", target: { descriptor: {
+      strategies: [{ kind: "css", value: "#result" }], framePath: []
+    } } }]));
     const left = await readdir(d);
     expect(left.filter((f) => f.includes(".tmp-"))).toHaveLength(0);
   });

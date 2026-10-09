@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { validateStepInput, validateStepsInput } from "../executor/stepValidation.js";
 import type { RunRecord, Step, Trace } from "../types.js";
 
 /** stepIndex 始终使用磁盘上原 trace 的索引，不是此前替换扩展后的索引。 */
@@ -17,67 +17,6 @@ export interface RepairPlan {
   ranges: Array<{ stepIndex: number; start: number; end: number }>;
 }
 
-const nonempty = z.string().min(1);
-const nonnegative = z.number().finite().nonnegative();
-const nth = nonnegative.int().optional();
-const strategySchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("test-id"), value: nonempty }),
-  z.object({ kind: z.literal("container-role-name"), containerText: nonempty, role: nonempty, name: z.string(), nth }),
-  z.object({ kind: z.literal("row-role-name"), rowText: nonempty, role: nonempty, name: z.string(), nth }),
-  z.object({ kind: z.literal("role-name"), role: nonempty, name: z.string(), nth }),
-  z.object({ kind: z.literal("text"), tag: nonempty, text: z.string(), nth }),
-  z.object({ kind: z.literal("css"), value: nonempty }),
-  z.object({ kind: z.literal("xpath"), value: nonempty })
-]);
-const targetSchema = z.object({
-  descriptor: z.object({
-    strategies: z.array(strategySchema).min(1),
-    framePath: z.array(nonempty),
-    distinguishers: z.array(z.string()).optional()
-  })
-});
-const waitSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("visible"), target: targetSchema }),
-  z.object({ type: z.literal("hidden"), target: targetSchema }),
-  z.object({ type: z.literal("url-contains"), value: z.string() }),
-  z.object({ type: z.literal("response"), urlPattern: nonempty })
-]);
-const dialogFields = {
-  dialog: z.enum(["accept", "dismiss"]).optional(),
-  promptText: z.string().optional()
-};
-
-// 仅校验新增的替换步骤；不使用解析后的对象，避免 Zod 去掉合法的透传字段。
-const stepSchema = z.discriminatedUnion("action", [
-  z.object({ ...dialogFields, action: z.literal("navigate"), url: nonempty }),
-  z.object({ ...dialogFields, action: z.literal("click"), target: targetSchema }),
-  z.object({ ...dialogFields, action: z.literal("fill"), target: targetSchema, value: z.string(), sensitive: z.boolean().optional() }),
-  z.object({ ...dialogFields, action: z.literal("select"), target: targetSchema, value: z.string() }),
-  z.object({ ...dialogFields, action: z.literal("press"), key: nonempty }),
-  z.object({ ...dialogFields, action: z.literal("hover"), target: targetSchema }),
-  z.object({
-    ...dialogFields, action: z.literal("scroll"), target: targetSchema.optional(),
-    direction: z.enum(["up", "down"]).optional(), amount: nonnegative.optional()
-  }),
-  z.object({ ...dialogFields, action: z.literal("wait"), until: waitSchema, timeout: nonnegative.optional() }),
-  z.object({ ...dialogFields, action: z.literal("sleep"), ms: nonnegative }),
-  z.object({
-    ...dialogFields, action: z.literal("assert"),
-    type: z.enum(["visible", "hidden", "text-equals", "text-contains", "url-contains", "screenshot-match"]),
-    target: targetSchema.optional(), expected: z.string().optional(),
-    fullPage: z.boolean().optional(), threshold: nonnegative.max(1).optional()
-  }),
-  z.object({
-    ...dialogFields, action: z.literal("extract"), target: targetSchema,
-    as: nonempty, from: z.enum(["text", "value"]).optional()
-  })
-]).superRefine((step, context) => {
-  if (step.action === "assert" && step.type !== "url-contains" &&
-      !(step.type === "screenshot-match" && step.fullPage) && !step.target) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ["target"], message: `assert ${step.type} 缺少 target` });
-  }
-});
-
 function validateStep(step: Step, originalIndex: number, replacementIndex: number): void {
   const label = `原第 ${originalIndex + 1} 步的第 ${replacementIndex + 1} 个替换步骤`;
   // ref 即使与 descriptor 同时出现也拒绝：执行器优先使用 ref，不能靠 schema 忽略它。
@@ -90,15 +29,12 @@ function validateStep(step: Step, originalIndex: number, replacementIndex: numbe
       throw new Error(`${label} 不能使用 ref；请提供可持久化的 descriptor`);
     }
   }
-  const parsed = stepSchema.safeParse(step);
-  if (!parsed.success) {
-    const details = parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("；");
-    throw new Error(`${label} 不合法：${details}`);
-  }
+  validateStepInput(step, label);
 }
 
 /** 纯构造：不写磁盘、不执行浏览器动作，所有索引都从同一份原 trace 出发。 */
 export function buildRepairPlan(trace: Trace, repairs: TraceRepair[]): RepairPlan {
+  validateStepsInput(trace.steps, true);
   if (!Array.isArray(repairs) || repairs.length < 1 || repairs.length > 3) {
     throw new Error("修复点数量必须为 1 至 3 个");
   }
