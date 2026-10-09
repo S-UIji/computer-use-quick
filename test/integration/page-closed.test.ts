@@ -124,7 +124,9 @@ describe("页面关闭失败", () => {
     expect(result.record?.failure?.kind).toBe("page-closed");
     expect(result.attempts).toBe(1);
     expect(result.record?.healRequired).toBe(false);
-    expect(events).toEqual(["done"]);
+    expect(events[0]).toBe("started");
+    expect(events.filter(kind => kind === "done")).toEqual(["done"]);
+    expect(events).not.toContain("retrying");
     const report = renderSuiteResult(r);
     expect(report).toContain("page-closed");
     expect(report).not.toContain("可接 heal_step 自愈");

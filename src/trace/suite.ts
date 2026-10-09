@@ -57,7 +57,17 @@ export interface SuiteTraceResult {
 }
 
 /** 用例级进度事件：首次失败即将重试发 retrying，最终结果发 done */
-export type TraceEvent = { kind: "retrying" | "done"; result: SuiteTraceResult };
+export interface TraceProgressInfo {
+  traceIndex: number;
+  path: string;
+  name: string;
+  attempt: 1 | 2;
+  totalSteps: number;
+}
+export type TraceEvent =
+  | ({ kind: "started" } & TraceProgressInfo)
+  | ({ kind: "step"; completedSteps: number } & TraceProgressInfo)
+  | { kind: "retrying" | "done"; result: SuiteTraceResult; traceIndex?: number };
 
 export interface SuiteResult {
   total: number;
@@ -94,13 +104,36 @@ export interface RunSuiteOptions {
   onTraceEvent?: (e: TraceEvent) => void;
 }
 
+/** 进度为旁路能力，同步或异步通知失败都不能改变运行结果。 */
+function emitTraceEvent(opts: RunSuiteOptions, event: TraceEvent): void {
+  if (!opts.onTraceEvent) return;
+  try { Promise.resolve(opts.onTraceEvent(event)).catch(() => {}); } catch { /* best effort */ }
+}
+
+function traceObserver(opts: RunSuiteOptions, info: TraceProgressInfo, observer?: StepObserver): StepObserver | undefined {
+  if (!opts.onTraceEvent) return observer;
+  return {
+    inputGate: observer?.inputGate,
+    onRunStart: async total => { await observer?.onRunStart(total); },
+    onStepStart: async (index, step, description) => { await observer?.onStepStart(index, step, description); },
+    onStepEnd: async result => {
+      await observer?.onStepEnd(result);
+      emitTraceEvent(opts, { ...info, kind: "step", completedSteps: result.index + (result.ok ? 1 : 0) });
+    },
+    onRunEnd: async outcome => { await observer?.onRunEnd(outcome); },
+    takeInterruption: () => observer?.takeInterruption(),
+    takeScrollCount: () => observer?.takeScrollCount() ?? 0
+  };
+}
+
 /** 单次尝试：独立 Context 完整重跑 + 归档（失败时抓截图进现场包） */
 async function attemptOnce(
   opts: RunSuiteOptions,
   path: string,
   suffix: string,
   prepared: PreparedTrace,
-  slot: WindowSlot
+  slot: WindowSlot,
+  traceIndex: number
 ): Promise<SuiteTraceResult> {
   const t0 = Date.now();
   let resource: Awaited<ReturnType<BrowserSession["newIsolatedPage"]>> | undefined;
@@ -111,6 +144,8 @@ async function attemptOnce(
     const snapshot = prepared.value;
     trace = snapshot.trace;
     traceFingerprint = snapshot.fingerprint;
+    const info: TraceProgressInfo = { traceIndex, path, name: trace.name, attempt: suffix ? 2 : 1, totalSteps: trace.steps.length };
+    emitTraceEvent(opts, { ...info, kind: "started" });
     resource = await opts.session.newIsolatedPage(slot);
     const { handle } = resource;
     const tracker = await NetworkTracker.attach(handle);
@@ -124,7 +159,7 @@ async function attemptOnce(
         updateBaselines: opts.updateBaselines,
         baselineRoot: opts.baselineRoot
       },
-      observer: opts.observerFor?.(handle, trace.name)
+      observer: traceObserver(opts, info, opts.observerFor?.(handle, trace.name))
     });
 
     // 失败现场包：截图必须在 Context release 前抓
@@ -170,20 +205,22 @@ async function attemptOnce(
 
 const isInterrupted = (r: SuiteTraceResult): boolean => r.record?.failure?.kind === "user-interrupted";
 
-/** 单条运行：失败则用全新 Context 完整重跑 1 次，以最终结果为准；被用户打断不重试 */
-async function runOne(opts: RunSuiteOptions, path: string, prepared: PreparedTrace, slot: WindowSlot): Promise<SuiteTraceResult> {
+/** 只有结构化暂态类型允许新 Context 重跑一次；介入/关闭/状态不确定优先阻止。 */
+async function runOne(opts: RunSuiteOptions, path: string, prepared: PreparedTrace, slot: WindowSlot, traceIndex: number): Promise<SuiteTraceResult> {
   const done = (r: SuiteTraceResult): SuiteTraceResult => {
-    opts.onTraceEvent?.({ kind: "done", result: r });
+    emitTraceEvent(opts, { kind: "done", result: r, traceIndex });
     return r;
   };
-  const first = await attemptOnce(opts, path, "", prepared, slot);
+  const first = await attemptOnce(opts, path, "", prepared, slot, traceIndex);
   if (first.ok) return done(first);
   // 用户在场才会被打断：重试大概率再被打断，如实报告即可
   if (isInterrupted(first)) return done({ ...first, interrupted: true });
   if (first.record?.failure?.retryBlocked) return done(first);
   if (first.pageClosed || first.record?.failure?.kind === "page-closed") return done(first);
-  opts.onTraceEvent?.({ kind: "retrying", result: first });
-  const second = await attemptOnce(opts, path, "-retry", prepared, slot);
+  const kind = first.record?.failure?.kind;
+  if (kind !== "timeout" && kind !== "navigation-failed") return done(first);
+  emitTraceEvent(opts, { kind: "retrying", result: first, traceIndex });
+  const second = await attemptOnce(opts, path, "-retry", prepared, slot, traceIndex);
   return done({
     ...second,
     flaky: second.ok || undefined,
@@ -215,7 +252,7 @@ export async function runSuite(opts: RunSuiteOptions): Promise<SuiteResult> {
           ? (input.reason instanceof Error ? input.reason.message : String(input.reason))
           : "因其他用例缺失变量，本用例未执行。"
     }));
-    for (const result of results) opts.onTraceEvent?.({ kind: "done", result });
+    results.forEach((result, traceIndex) => emitTraceEvent(opts, { kind: "done", result, traceIndex }));
     return { total: results.length, ok: 0, failed: results.length, flaky: 0,
       durationMs: Date.now() - t0, results, preflightFailed: true,
       ...(environmentUsed.length ? { environmentUsed } : {}) };
@@ -228,7 +265,7 @@ export async function runSuite(opts: RunSuiteOptions): Promise<SuiteResult> {
     for (;;) {
       const i = next++;
       if (i >= opts.paths.length) return;
-      results[i] = await runOne(opts, opts.paths[i], prepared[i], { index, of: workerCount });
+      results[i] = await runOne(opts, opts.paths[i], prepared[i], { index, of: workerCount }, i);
     }
   };
 

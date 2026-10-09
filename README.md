@@ -61,7 +61,7 @@ Chrome 不在常见位置（或想用 Edge）时，用 `CUQ_CHROME_PATH` 指定�
 | `discard_steps` | 探索走了弯路时，丢弃已记录的步骤（最近 N 步或全部），再 `save_trace` |
 | `save_trace` | 探索完，把成功的步骤固化成可回放用例 |
 | `replay` | 跑已有用例。CI 回归用这个，全程不调模型 |
-| `replay_suite` | 并行回放多条 trace：每条独立 BrowserContext（零共享 cookie），失败自动完整重试 1 次（flaky 标记），跑完全部再汇总；失败上下文可直接接 `heal_step`。`concurrency` 默认 3、上限 8 |
+| `replay_suite` | 并行回放多条 trace：每条独立 BrowserContext（零共享 cookie），等待超时或导航失败最多完整重试 1 次（flaky 标记）；定位缺失/歧义、普通断言及未识别错误不自动重跑，跑完全部再汇总；相同完整失败诊断合并正文，各用例台账与路径保留。`concurrency` 默认 3、上限 8 |
 | `save_auth` | 把当前页面登录态（cookie + localStorage）存为认证态文件并设为 session 默认，replay/suite/heal 验证门自动注入——用例不必每次从头登录 |
 | `heal_step` | 单点演示修正步，或 `repairs` 同时提交多处修复 → 独立 Context 全量验证 → 全绿才写回。原始断言拒修；`dryRun` 不写回、不改变预算 |
 | `inspect` | 只在排查失败时用。取截图/console/网络 |
@@ -255,7 +255,8 @@ node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1�
   被打断后先等待用户完成：batch 先 snapshot 刷新 ref、核实停止步骤效果，再继续剩余步骤；
   replay 重新完整回放；自愈则重新提交原始修复参数，不重放尚未写回的候选。
 - **进度推送**：客户端在 `tools/call` 的 `_meta` 带 `progressToken` 时，batch/replay 按步、
-  replay_suite 按用例、heal_step 按「演示 → 验证门」推送 `notifications/progress`（与有头无头无关）。
+  replay_suite 即时报告开始、约每250ms汇总活跃用例的真实已完成步数，并即时报告重试/终态；数字progress按已处理用例计数，重试不倒退。
+  heal_step 按「演示 → 验证门」推送 `notifications/progress`（与有头无头无关）。
   用户中断结束时额外推送一次停止通知，显示真实步号并保留已有进度；关闭页面标注也能收到。
   Claude Code 的展示情况（据其 changelog 与 issue #86464，未在本项目实测）：前台调用时进度文字显示在工具调用行下方；
   超过 120s 被转入后台的调用，2026-09 下旬之前的版本会丢弃进度，之后的版本在后台任务里显示最新进度。
@@ -297,7 +298,7 @@ SIGTERM、Ctrl+C）或调用 `BrowserSession.close()` 时会先撤掉所有标�
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（77 个文件 / 632 个测试）
+npm test                  # 先 tsc 构建再跑全部（81 个文件 / 690 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```

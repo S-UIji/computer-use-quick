@@ -255,6 +255,19 @@ node scripts/e2e-smoke.mjs
 
 证据：.scratch/r14-full-verified.log、r14-disconnect-green.log、r14-fixture-green.log、r14-last-targeted.log、r14-smoke.log、r14-full-complete.log、r14-hung-page-probe.log；.scratch/r14-implementation-evidence/ 的 result.json、report.md、diagnosis.md、协议/时间线和各轮截图。正式报告及完整剩余清单：docs/r14-background-input-fix-2026-10-09.md、docs/remaining-work-2026-10-09.md。
 
+## R16 套件反馈、报告与重试验收（2026-10-09）
+
+- 有效调用立即发送开始通知，约250ms汇总各输入位置的真实已完成步数；slowMo插入的sleep不计数。无token无通知，完成后无迟到通知。
+- 仅timeout/navigation-failed允许全新Context完整重试一次；定位缺失/歧义、普通断言、未识别错误不自动重跑。保留用户介入、关闭和retryBlocked优先保护。
+- 相同完整失败诊断共用正文，各用例路径、台账、耗时和独立归档/自愈证据保留；不同诊断不误合并。同名即时终态带序号，第二次保护终态显示实际尝试历史。
+- 核心、分组、计时和复审边界先RED再GREEN；最终全量81文件/690测试通过，366.00s。独立最终复审无Critical/Important/Minor。
+- 最新有头Chrome154两轮各51/51、独立审计17/17通过。3条相同缺目标trace的真实POST从6降到3，快照正文3→1；同条件串行墙钟15657→7977/8287ms，正文2735→2043字符，首通知2716→5/6ms。该性能对比仅针对临时SUT。
+- 实测重复名称/路径、差异诊断、暂态重试、可信介入、关闭、首/第二次retryBlocked及batch/replay/heal记账；每suite权威CDP Context数0→0，专属进程/profile均清理。主代理核对两轮截图。
+- 最新两轮使用离屏专属正常窗口；Claude实际UI、人工OS输入/焦点及正常平铺未验。一次Target.createTarget异常未再复现，原因未确定；原始失败及harness修正轮都保留，不计通过轮。
+- 两轮headless自愈闭环均从1成功/1失败，经heal复跑2成功/0失败，终判2502ms/2475ms，E2E_SMOKE_RESULT ok=2 failed=0 rounds=2，退出码0；PID/profile/ci-env核验清理。
+
+证据：.scratch/r16-full-final.log、r16-review-green.log、r16-contracts-green.log、r16-report-green-singleton-path.log、r16-smoke.log及.scratch/r16-evidence/qa-report-latest.md、final-audit-latest.json、build-cleanup-proof-latest.json。详细报告：docs/r16-suite-feedback-fix-2026-10-09.md。
+
 ## 每次修复的验收门槛
 
 - 相关单元/集成测试全绿。

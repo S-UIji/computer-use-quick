@@ -10,7 +10,9 @@
     // 依赖 fixture server 的 /api/flaky-once：整个测试进程内第一次调用 500，之后 200
     document.getElementById("load").addEventListener("click", async () => {
       const r = await fetch("/api/flaky-once");
-      document.getElementById("out").textContent = r.ok ? "加载成功" : "加载失败";
+      const output = document.getElementById("out");
+      output.textContent = r.ok ? "加载成功" : "加载失败";
+      if (r.ok) output.dataset.ready = "true";
     });
   </script>
 </body></html>

@@ -177,9 +177,9 @@ describe("运行归档（任务 1.3）", () => {
     const r = await runSuite({ session, paths, vars: {}, concurrency: 2, runsDir: runs });
     expect(r.ok).toBe(1);
 
-    // 失败条会自动重试：arch-bad 有首败与 -retry 两份归档
+    // 定位缺失不自动重试：成功与失败各一份完整归档
     const dirs = await readdir(runs);
-    expect(dirs).toHaveLength(3);
+    expect(dirs).toHaveLength(2);
     const okDir = dirs.find((x) => x.includes("arch-ok"))!;
     const badDir = dirs.find((x) => x.includes("arch-bad") && !x.endsWith("-retry"))!;
     // 成功运行：仅 run-record
@@ -203,7 +203,7 @@ describe("单条重试（任务 2.3）", () => {
   it("首败重试通过 → flaky 标记 + 聚合报告体现 + 两次尝试各归档", async () => {
     const d = await tmp();
     const runs = join(d, "runs");
-    // /api/flaky-once 进程内首调 500：首 attempt 的 assert 挂，重试（200）通过
+    // 首调500不生成成功标记：等待超时后重试（200），普通断言失败不重跑。
     const trace: Trace = {
       name: "flaky-trace", baseUrl: fx.url, createdAt: "2026-09-24T00:00:00.000Z",
       steps: [
@@ -211,9 +211,8 @@ describe("单条重试（任务 2.3）", () => {
         { action: "click", target: { descriptor: {
           strategies: [{ kind: "css" as const, value: "#load" }], framePath: []
         } } },
-        { action: "assert", type: "text-contains" as const,
-          target: { descriptor: { strategies: [{ kind: "css" as const, value: "#out" }], framePath: [] } },
-          expected: "加载成功" }
+        { action: "wait", until: { type: "visible",
+          target: { descriptor: { strategies: [{ kind: "css" as const, value: "#out[data-ready]" }], framePath: [] } } }, timeout: 100 }
       ]
     };
     const tracePath = await saveTrace(d, trace);
@@ -235,13 +234,17 @@ describe("单条重试（任务 2.3）", () => {
   it("重试仍失败 → attempts=2 按失败处理", async () => {
     const d = await tmp();
     const runs = join(d, "runs");
-    const paths = await writeTraces(d, [brokenTrace("retry-broken")]);
+    const paths = await writeTraces(d, [{ ...brokenTrace("retry-broken"), steps: [
+      { action: "navigate", url: "/cards-v1.html" },
+      { action: "wait", until: { type: "visible", target: { descriptor: {
+        strategies: [{ kind: "css", value: "#never-ready" }], framePath: [] } } }, timeout: 30 }
+    ] }]);
     const r = await runSuite({ session, paths, vars: {}, concurrency: 1, runsDir: runs });
 
     expect(r.failed).toBe(1);
     expect(r.results[0].attempts).toBe(2);
     expect(r.results[0].flaky).toBeUndefined();
-    expect(r.results[0].record?.failure?.kind).toBe("target-not-found");
+    expect(r.results[0].record?.failure?.kind).toBe("timeout");
     // 两次失败尝试都归档（现场包各一份）
     expect(await readdir(runs)).toHaveLength(2);
     // 重试不消耗自愈预算（suite 层不触碰 healBudgets，结构性保证）

@@ -3,7 +3,13 @@ import { failureUrlNotice } from "../session/pageUrl.js";
 import { describeAction } from "./describeStep.js";
 import { interruptionRecovery, type RecoveryMode } from "./interruptionRecovery.js";
 
-export function renderRunRecord(rec: RunRecord, mode: RecoveryMode = "replay"): string {
+export interface RunRecordRenderOptions {
+  includeFailureContext?: boolean;
+}
+
+export function renderRunRecord(
+  rec: RunRecord, mode: RecoveryMode = "replay", options: RunRecordRenderOptions = {}
+): string {
   const stopAt = (rec.failure?.failedIndex ?? 0) + 1;
   const head = rec.ok
     ? `✅ ${rec.traceName} 回放成功 — ${rec.steps.length} 步，合计 ${rec.durationMs}ms`
@@ -30,18 +36,24 @@ export function renderRunRecord(rec: RunRecord, mode: RecoveryMode = "replay"): 
     }
   }
 
-  if (rec.failure) {
-    const f = rec.failure;
-    lines.push(
-      "", `## 失败上下文（heal_required=${rec.healRequired}）`, "",
-      `**类型**：${f.kind}`, `**信息**：${f.message}`, "",
-      ...(f.currentUrl === undefined ? [] : [failureUrlNotice(f).trimEnd(), ""]),
-      "**失败步骤**", "```json", JSON.stringify(f.failedStep, null, 2), "```", "",
-      "**当前快照**", "```", f.snapshot, "```", "",
-      `**console 报错**`, f.consoleErrors.join("\n") || "（无）", "",
-      `**失败请求**`, f.failedRequests.join("\n") || "（无）"
-    );
+  if (rec.failure && options.includeFailureContext !== false) {
+    lines.push("", renderFailureContext(rec));
   }
 
   return lines.join("\n");
+}
+
+/** 共用失败正文；独立台账仍由 renderRunRecord 渲染。 */
+export function renderFailureContext(rec: RunRecord): string {
+  const f = rec.failure;
+  if (!f) return "";
+  return [
+    `## 失败上下文（heal_required=${rec.healRequired}）`, "",
+    `**类型**：${f.kind}`, `**信息**：${f.message}`, "",
+    ...(f.currentUrl === undefined ? [] : [failureUrlNotice(f).trimEnd(), ""]),
+    "**失败步骤**", "```json", JSON.stringify(f.failedStep, null, 2), "```", "",
+    "**当前快照**", "```", f.snapshot, "```", "",
+    `**console 报错**`, f.consoleErrors.join("\n") || "（无）", "",
+    `**失败请求**`, f.failedRequests.join("\n") || "（无）"
+  ].join("\n");
 }

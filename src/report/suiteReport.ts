@@ -1,5 +1,5 @@
 import type { SuiteResult, TraceEvent } from "../trace/suite.js";
-import { renderRunRecord } from "./runRecord.js";
+import { renderSuiteFailureGroups } from "./suiteFailureGroups.js";
 
 /**
  * 并行 suite 的聚合报告：概览 + 每条 compact + 失败全量上下文。
@@ -13,22 +13,23 @@ export function renderSuiteResult(r: SuiteResult): string {
   ];
 
   for (const t of r.results) {
+    const attemptNote = !t.ok && t.attempts === 2 ? "，尝试 2 次" : !t.ok && t.attempts === 1 ? "，未自动重试" : "";
     if (t.ok) {
       const mark = t.flaky ? `✓ ${t.name}（flaky，重试后通过）` : `✓ ${t.name}`;
       lines.push(`${mark} — ${t.stepCount} 步，${(t.durationMs / 1000).toFixed(1)}s，漂移 ${t.driftCount}`);
     } else if (t.interrupted) {
       lines.push(
         `✋ ${t.name} — 被用户打断（停在第 ${(t.record?.failure?.failedIndex ?? 0) + 1} 步），` +
-        `${(t.durationMs / 1000).toFixed(1)}s`
+        `${(t.durationMs / 1000).toFixed(1)}s${attemptNote}`
       );
     } else if (t.error !== undefined) {
       const label = t.attempts === 0 ? "预检未通过，未执行" : "未预期异常";
-      lines.push(`✗ ${t.name} — ${label}：${t.error}`);
+      lines.push(`✗ ${t.name} — ${label}：${t.error}${attemptNote}`);
     } else {
       const f = t.record?.failure;
       lines.push(
         `✗ ${t.name} — 第 ${(f?.failedIndex ?? 0) + 1} 步失败（${f?.kind ?? "unknown"}），` +
-        `${(t.durationMs / 1000).toFixed(1)}s，漂移 ${t.driftCount}`
+        `${(t.durationMs / 1000).toFixed(1)}s，漂移 ${t.driftCount}${attemptNote}`
       );
     }
   }
@@ -37,22 +38,20 @@ export function renderSuiteResult(r: SuiteResult): string {
   const failed = r.results.filter((t) => !t.ok && t.record && !t.interrupted && !t.pageClosed && !t.record.failure?.retryBlocked && t.record.failure?.kind !== "page-closed");
   if (failed.length > 0) {
     lines.push("", "## 失败上下文（可接 heal_step 自愈）", "");
-    for (const t of failed) {
-      lines.push(`### ${t.name}`, "", renderRunRecord(t.record!), "");
-    }
+    lines.push(...renderSuiteFailureGroups(failed));
   }
 
   const blocked = r.results.filter((t) => !t.ok && t.record?.failure?.retryBlocked);
   if (blocked.length) {
-    lines.push("", "## 需要人工恢复（未自动重试）", "");
-    for (const t of blocked) lines.push(`### ${t.name}`, "", renderRunRecord(t.record!), "");
+    lines.push("", "## 需要人工恢复（停止后续重试）", "");
+    lines.push(...renderSuiteFailureGroups(blocked));
     lines.push("请按失败提示恢复页面或连接，并 snapshot 核实副作用，避免直接重试。", "");
   }
 
   const closed = r.results.filter((t) => !t.ok && (t.pageClosed || t.record?.failure?.kind === "page-closed"));
   if (closed.length > 0) {
-    lines.push("", "## 页面关闭 page-closed（未自动重试，无需 heal_step）", "");
-    for (const t of closed) lines.push(`### ${t.name}`, "", renderRunRecord(t.record!), "");
+    lines.push("", "## 页面关闭 page-closed（停止后续重试，无需 heal_step）", "");
+    lines.push(...renderSuiteFailureGroups(closed));
     lines.push("请恢复页面后重新运行。", "");
   }
 
@@ -68,11 +67,14 @@ export function renderSuiteResult(r: SuiteResult): string {
 
 /** 用例级进度说明（replay_suite 推送 notifications/progress 用） */
 export function renderTraceEvent(e: TraceEvent): string {
+  if (e.kind === "started") return e.name + " 开始（第 " + e.attempt + " 次，" + e.totalSteps + " 步）";
+  if (e.kind === "step") return e.name + " 已完成 " + e.completedSteps + "/" + e.totalSteps + " 步";
   const t = e.result;
+  const name = e.traceIndex === undefined ? t.name : "#" + (e.traceIndex + 1) + " " + t.name;
   const kind = t.attempts === 0 ? "preflight-failed"
     : t.record?.failure?.kind ?? (t.error !== undefined ? "unexpected-error" : "unknown");
-  if (e.kind === "retrying") return `${t.name} ✗ ${kind}，重试中`;
-  if (t.ok) return `${t.name} ✓ ${(t.durationMs / 1000).toFixed(1)}s${t.flaky ? "（flaky）" : ""}`;
-  if (t.interrupted) return `${t.name} ✋ 被用户打断`;
-  return `${t.name} ✗ ${kind}`;
+  if (e.kind === "retrying") return `${name} ✗ ${kind}，重试中`;
+  if (t.ok) return `${name} ✓ ${(t.durationMs / 1000).toFixed(1)}s${t.flaky ? "（flaky）" : ""}`;
+  if (t.interrupted) return `${name} ✋ 被用户打断`;
+  return `${name} ✗ ${kind}`;
 }

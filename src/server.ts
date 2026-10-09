@@ -21,13 +21,14 @@ import {
 import { checkConcurrency, runSuite } from "./trace/suite.js";
 import { buildRepairPlan, assessRepairs, repairFailureLocation, type TraceRepair } from "./trace/repairPlan.js";
 import { archiveRun } from "./report/archive.js";
-import { renderSuiteResult, renderTraceEvent } from "./report/suiteReport.js";
+import { renderSuiteResult } from "./report/suiteReport.js";
 import { renderRunRecord } from "./report/runRecord.js";
 import { interruptionRecovery } from "./report/interruptionRecovery.js";
 import { createVariableRedactor, redactVariableFailure, redactVariableSnapshot } from "./report/variablePrivacy.js";
 import { captureAuth, applyAuth, loadAuth, type AuthState } from "./session/auth.js";
 import { RunWatch } from "./watch/runWatch.js";
 import { ProgressReporter } from "./watch/progress.js";
+import { SuiteProgress } from "./watch/suiteProgress.js";
 
 /** 最近一次 snapshot 的 ref 表，按 pageId 保存，供 batch 用 ref 指代元素 */
 export const refTables = new Map<string, Map<string, number>>();
@@ -435,33 +436,29 @@ export function createServer(session: BrowserSession): McpServer {
       if (!gate.ok) {
         return { isError: true, content: [{ type: "text" as const, text: gate.reason }] };
       }
-      const { auth: authState, error: authError } = await resolveAuth(auth);
-      if (authError) {
-        return { isError: true, content: [{ type: "text" as const, text: authError }] };
-      }
-      const variableState = resolveVariables(vars);
       const progress = ProgressReporter.from(extra);
-      let doneCount = 0;
-      const result = await runSuite({
-        session, paths: await Promise.all(tracePaths.map(canonicalTracePath)),
-        vars: variableState.values, environmentNames: variableState.environmentNames,
-        concurrency: gate.value, slowMoMs, resolveRetryMs,
-        auth: authState,
-        updateBaselines,
-        // 每个隔离页各自标注自己的用例；步骤级进度在并发下会交错，只推用例级进度
-        observerFor: (handle, name) => new RunWatch({ handle, label: name, watch: session.watchEnabled }),
-        onTraceEvent: (e) => {
-          if (e.kind === "done") doneCount += 1;
-          progress.report(doneCount, tracePaths.length, renderTraceEvent(e));
+      const suiteProgress = new SuiteProgress(progress, tracePaths.length);
+      suiteProgress.start();
+      try {
+        const { auth: authState, error: authError } = await resolveAuth(auth);
+        if (authError) {
+          return { isError: true, content: [{ type: "text" as const, text: authError }] };
         }
-      });
-      // 逐 trace 记账：suite 的结果对 heal_step 直接可见，语义等价于各跑过一次单条 replay。
-      // 成功 trace 同时清自愈预算——全绿即开启新一轮修复周期
-      for (const t of result.results) {
-        if (t.record && t.traceFingerprint) rememberRun(t.path, t.traceFingerprint, t.record);
-      }
-      return { isError: result.preflightFailed || undefined, content: [{ type: "text" as const,
-        text: notices(session) + variableSourceNotice(result.environmentUsed ?? []) + renderSuiteResult(result) }] };
+        const variableState = resolveVariables(vars);
+        const result = await runSuite({
+          session, paths: await Promise.all(tracePaths.map(canonicalTracePath)),
+          vars: variableState.values, environmentNames: variableState.environmentNames,
+          concurrency: gate.value, slowMoMs, resolveRetryMs, auth: authState, updateBaselines,
+          observerFor: (handle, name) => new RunWatch({ handle, label: name, watch: session.watchEnabled }),
+          onTraceEvent: progress.enabled ? event => suiteProgress.accept(event) : undefined
+        });
+        // 合并仅影响报告；各路径的完整运行证据仍独立记账。
+        for (const trace of result.results) {
+          if (trace.record && trace.traceFingerprint) rememberRun(trace.path, trace.traceFingerprint, trace.record);
+        }
+        return { isError: result.preflightFailed || undefined, content: [{ type: "text" as const,
+          text: notices(session) + variableSourceNotice(result.environmentUsed ?? []) + renderSuiteResult(result) }] };
+      } finally { suiteProgress.dispose(); }
     }
   );
 
