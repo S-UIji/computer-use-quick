@@ -1,6 +1,6 @@
 # computer-use-quick 全量端到端冒烟计划
 
-首次执行：2026-09-30；状态更新：2026-10-08
+首次执行：2026-09-30；状态更新：2026-10-09
 目标：用真实有头 Chrome、真实 MCP stdio 客户端和旁路“用户”连接，验证从探索到回放、自愈、并发、观察模式和浏览器生命周期的完整链路，并把模型/用户实际会遇到的不舒服之处记录成可修复的问题。
 
 ## 执行原则
@@ -231,6 +231,29 @@ node scripts/e2e-smoke.mjs
 - 两轮 headless 隔离闭环冒烟通过：SUITE_RESULT ok=2 failed=0 total=2 wall_ms=2402；SUITE_RESULT ok=2 failed=0 total=2 wall_ms=2592。专属进程与临时 profile 已核对清理，ci-env 不再存在。
 - 截图记录一项后续 UI 改善：窄窗口执行态角标遮住部分标题，长导航文案省略；本次未修改执行态角标。
 - 证据：.scratch/r13-full-final.log、r13-final-targeted.log、r13-headed-final.log、r13-smoke.log、r13-evidence/result.json、command-fallback.json 和各轮截图。
+
+## R14 后台输入正式验收（2026-10-09）
+
+1. 在同窗口另一标签保留用户页面，真实填写/按键/点击/悬停/选择/目标滚动检查实际值、结果及可信事件。
+2. 覆盖定位失败、输入失败、已应用但开启响应丢失、关闭、导航、断连、恢复失败；恢复不确定时不得自动重复副作用或沿用旧自愈证据。
+3. 同页重叠动作按顺序收尾，多页并发独立；保持真实用户介入和准确进度，恢复后新调用可执行。
+4. 无目标滚轮必须检查实际 scrollY，按用户批准告警并前台执行。后台有头截图不强制激活，保留文字诊断；headless 视觉回归保持正常。
+5. 模式识别覆盖真实参数、UA 中伪装的 headless 字符串和并发初始化，避免误切用户标签。
+6. Chrome148/154 各两轮真实 MCP 覆盖 batch、save/replay、缺目标诊断、heal、三并发 suite、导航与 batch/replay 用户中断恢复；记录双通道 CDP 和页面事件，检查模拟开启/关闭对数。
+7. 独立审查、最后全量及隔离冒烟后提交推送；保留失败日志、准确记录环境和未证明结论。
+
+验收结果：
+
+- 最终生产代码完整回归 76 文件 / 624 测试通过，361.44s；独立代码及夹具复审 Critical/Important/Minor 均为 0。
+- 真实断连和真正关闭等定向 3 文件 / 38 测试通过；测试清理调整后的后台输入、真实 MCP server、真实多点自愈 3 文件 / 38 测试通过。
+- 最后夹具及测试排版版本定向 3 文件 / 24 测试通过，12.66s，退出码0。
+- 两版有头各两轮全通过。每轮 suite 39 步 / 12 次可信提交，三并发墙钟 3816/3808/3912/3866ms；模拟 45 开/45 关成功、最终 active=0，仅 native wheel 一次显式 Page.bringToFront，实际 scrollY=420。
+- 每轮真实用户 batch/replay 中断 progress=2/4，后续副作用不执行，snapshot 后恢复成功；heal 审计一条，Context 全部释放。截图已由主代理核对。
+- 四轮使用离屏 normal 窗口 2100,100,1100×850，实际屏幕可用区域1920×1032。早先可见窗口和最小调查的可见性异常仍保留且未证明归因；不以本次受控通过替代 Windows 其他应用焦点或原外部站点约63秒现场验证。
+- 一轮最后全量曾在夹具 beforeEach/afterEach 各30秒超时，遗留 renderer 不响应导致后续 MCP 超时；独立 CDP 证据及中止日志保留。修复按task绑定资源、迟到setup门禁、先关闭自建页和finally断开后重新完整通过，未增大超时阈值。首个renderer挂住原因仍未证明。
+- 最终两轮 headless 均完成初次1成功/1失败 → heal → 复跑2成功/0失败，终判墙钟2445ms / 2465ms，E2E_SMOKE_RESULT ok=2 failed=0 rounds=2，退出码0；专属浏览器/profile和ci-env已核验清理。
+
+证据：.scratch/r14-full-verified.log、r14-disconnect-green.log、r14-fixture-green.log、r14-last-targeted.log、r14-smoke.log、r14-full-complete.log、r14-hung-page-probe.log；.scratch/r14-implementation-evidence/ 的 result.json、report.md、diagnosis.md、协议/时间线和各轮截图。正式报告及完整剩余清单：docs/r14-background-input-fix-2026-10-09.md、docs/remaining-work-2026-10-09.md。
 
 ## 每次修复的验收门槛
 

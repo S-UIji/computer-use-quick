@@ -152,8 +152,18 @@ export async function showOverlay(handle: PageHandle, state: OverlayState): Prom
   await applyLatest(handle, overlayEntry(handle, state));
 }
 
+export class BackgroundScreenshotError extends Error {
+  constructor() {
+    super("后台标签暂无可用截图渲染帧，未切换用户标签；请手动选中该页，并核实已执行步骤后继续截图。");
+    this.name = "BackgroundScreenshotError";
+  }
+}
+
 /** 隐藏期间暂停导航恢复；嵌套隐藏全部结束后才恢复最新状态。 */
 export async function withOverlayHidden<T>(handle: PageHandle, fn: () => Promise<T>): Promise<T> {
+  // Headless 无人界面沿用可渲染页；有头后台截图不抢用户标签或等待缺失帧。
+  if (handle.headless === true) await handle.cdp.send("Page.bringToFront");
+  else if (await handle.page.evaluate(() => document.visibilityState) !== "visible") throw new BackgroundScreenshotError();
   const entry = overlayEntries.get(handle);
   if (!entry && !overlaid.has(handle)) return fn();
   if (entry) {

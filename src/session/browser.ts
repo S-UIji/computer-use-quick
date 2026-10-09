@@ -2,6 +2,7 @@ import puppeteer, { type Browser, type Page, type CDPSession } from "puppeteer-c
 import { parseWatchSetting, resolveWatchEnabled } from "../watch/mode.js";
 import { removeAllOverlays } from "../watch/overlay.js";
 import { tileWindow, type WindowSlot, type WindowArea } from "./windowLayout.js";
+import { isHeadlessShell, headlessFromCommandLine } from "./browserMode.js";
 import { DialogGuard } from "./dialogs.js";
 import { PageClosedError, assertPageOpen } from "./pageErrors.js";
 import {
@@ -13,6 +14,8 @@ export interface PageHandle {
   pageId: string;
   page: Page;
   cdp: CDPSession;
+  /** 从真实启动参数确认；未知时保持 undefined。 */
+  headless?: boolean;
 }
 
 /**
@@ -40,10 +43,6 @@ async function detectWatch(browser: Browser): Promise<boolean> {
   }
 }
 
-function isHeadlessShell(executable: string): boolean {
-  return /(?:^|[\\/])(?:chrome-headless-shell|headless_shell)(?:\.exe)?$/i.test(executable);
-}
-
 export interface SessionOptions {
   /** 观察模式显式开关；省略则每次连接时按 CUQ_WATCH 与浏览器 UA 判定 */
   watch?: boolean;
@@ -63,6 +62,7 @@ export class BrowserSession {
   private connecting?: Promise<Browser>;
   private watch = false;
   private tileEnabled = false;
+  private headless?: boolean;
   private layoutGroup?: { users: number; area?: Promise<WindowArea> };
   private everConnected = false;
   private notice?: string;
@@ -96,6 +96,7 @@ export class BrowserSession {
   }
 
   private ensureConnected(): Promise<Browser> {
+    if (this.connecting) return this.connecting;
     if (this.browser?.connected) return Promise.resolve(this.browser);
     this.connecting ??= this.establish().finally(() => { this.connecting = undefined; });
     return this.connecting;
@@ -129,22 +130,19 @@ export class BrowserSession {
     });
     this.watch = this.opts.watch ?? await detectWatch(browser);
     await this.watchTargets(browser);
-    if (this.watch) {
-      // UA 可被 --user-agent 覆盖；从真实启动参数判断，无法确认时跳过布局。
+    // 实际模式同时用于布局与截图；不能用可覆盖的 UA 判定。
+    try {
+      const command = await this.browserCdp!.send("Browser.getBrowserCommandLine");
+      if (command.arguments.length) this.headless = isHeadlessShell(command.arguments[0]) ||
+        command.arguments.some((arg) => arg === "--headless" || arg.startsWith("--headless="));
+    } catch {
       try {
-        const command = await this.browserCdp!.send("Browser.getBrowserCommandLine");
-        this.tileEnabled = command.arguments.length > 0 && !isHeadlessShell(command.arguments[0]) && !command.arguments.some((arg) => arg === "--headless" || arg.startsWith("--headless="));
-      } catch {
-        try {
-          const info = await this.browserCdp!.send("SystemInfo.getInfo");
-          const executable = info.commandLine.match(/^(?:"([^"]+)"|(\S+))/)?.slice(1).find(Boolean) ?? "";
-          this.tileEnabled = !!info.commandLine && !isHeadlessShell(executable) && !/(?:^|[\s"'])--headless(?:[=\s"']|$)/.test(info.commandLine);
-        } catch {
-          this.tileEnabled = false;
-          console.error("[computer-use-quick] 无法确认有头浏览器，窗口平铺不启用");
-        }
-      }
+        const info = await this.browserCdp!.send("SystemInfo.getInfo");
+        this.headless = headlessFromCommandLine(info.commandLine);
+      } catch { /* 无法确认时不移动有头窗口或标签。 */ }
     }
+    this.tileEnabled = this.watch && this.headless === false;
+    if (this.watch && this.headless === undefined) console.error("[computer-use-quick] 无法确认有头浏览器，窗口平铺不启用");
     this.notice = connectNotice(this.everConnected, launchedProfile);
     this.everConnected = true;
     return browser;
@@ -156,6 +154,7 @@ export class BrowserSession {
     this.closedSelection = undefined;
     this.browserCdp = undefined;
     this.tileEnabled = false;
+    this.headless = undefined;
     this.layoutGroup = undefined;
   }
 
@@ -246,7 +245,7 @@ export class BrowserSession {
     let cdp: CDPSession | undefined;
     try {
       cdp = await page.createCDPSession();
-      const handle: PageHandle = { pageId: key, page, cdp };
+      const handle: PageHandle = { pageId: key, page, cdp, headless: this.headless };
       // 弹窗守卫最先装，避免后续 enable 被既有弹窗挂住。
       const guard = await DialogGuard.install(handle);
       await guard.settlePending();

@@ -15,6 +15,7 @@ import { LocatorError } from "../locator/resolve.js";
 import { takeSnapshot } from "../perception/snapshot.js";
 import { buildDescriptor } from "../locator/descriptor.js";
 import { isPlaintextSecret } from "../trace/store.js";
+import { BackgroundScreenshotError } from "../watch/overlay.js";
 import { DialogGuard, describeDialog } from "../session/dialogs.js";
 
 export interface BatchOptions {
@@ -165,6 +166,9 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
     let description = describeAction(raw.action);
     const t0 = Date.now();
     const notes: string[] = [];
+    const inputWarnings: string[] = [];
+    let retryBlocked = false;
+    ctx.onInputWarning = (warning) => { inputWarnings.push(warning.message); retryBlocked ||= !!warning.retryBlocked; };
     ctx.onResolved = undefined;
     ctx.lastWaitTimedOut = undefined;
 
@@ -211,6 +215,7 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
       } else {
         await runAction(ctx, step);
       }
+      notes.push(...inputWarnings);
       assertPageOpen(opts.handle);
       ctx.onResolved = undefined;
       if (step.action === "extract") activeEnvironment.delete(step.as);
@@ -285,6 +290,7 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
         return fail(failure);
       }
     } catch (err) {
+      if (err instanceof BackgroundScreenshotError) retryBlocked = true;
       ctx.onResolved = undefined;
       const c = classify(err, opts.handle);
       const detected = obs?.takeInterruption();
@@ -295,7 +301,7 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
         ? `本步执行期间检测到用户操作（${describeInterruption(interruption)}）；原始错误：${c.kind}：${c.message}`
         : c.message;
       // 弹窗被取消常是后续断言失败的原因，失败时同样要显形
-      const dialogNotes = (dialogs?.takeHandled() ?? []).map(describeDialog);
+      const dialogNotes = [...(dialogs?.takeHandled() ?? []).map(describeDialog), ...inputWarnings];
       const message = dialogNotes.length ? `${baseMessage}（本步期间${dialogNotes.join("；")}）` : baseMessage;
       const result: StepResult = {
         index: i, action: raw.action,
@@ -304,6 +310,7 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
       results.push(result);
       await obs?.onStepEnd(result);
       const failure = await failureAt(opts, i, raw, kind, message, c.candidates);
+      if (retryBlocked && kind !== "page-closed") failure.retryBlocked = true;
       await obs?.onRunEnd({ ok: false, failedIndex: i, interrupted: interruption !== undefined });
       return fail(failure);
     }

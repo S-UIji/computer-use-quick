@@ -107,7 +107,7 @@ export function createServer(session: BrowserSession): McpServer {
   // 只在本服务实例内保存原始 URL，避免不同会话的观察基线串扰。
   const observedUrls = new Map<string, string>();
   const healingTraces = new Set<string>();
-  const healEvidence = new Map<string, { fingerprint: string; failures: Map<number, FailureKind> }>();
+  const healEvidence = new Map<string, { fingerprint: string; failures: Map<number, FailureKind>; retryBlocked?: boolean }>();
   const rememberRun = (path: string, fingerprint: string, record: RunRecord): void => {
     lastRunByTrace.set(path, record);
     if (record.ok) {
@@ -118,8 +118,9 @@ export function createServer(session: BrowserSession): McpServer {
     const previous = healEvidence.get(path);
     if (previous && previous.fingerprint !== fingerprint) healBudgets.delete(path);
     const evidence = previous?.fingerprint === fingerprint
-      ? previous : { fingerprint, failures: new Map<number, FailureKind>() };
-    if (record.failure) evidence.failures.set(record.failure.failedIndex, record.failure.kind);
+      ? previous : { fingerprint, failures: new Map<number, FailureKind>(), retryBlocked: false };
+    evidence.retryBlocked = !!record.failure?.retryBlocked;
+    if (record.failure && !record.failure.retryBlocked) evidence.failures.set(record.failure.failedIndex, record.failure.kind);
     healEvidence.set(path, evidence);
   };
 
@@ -397,7 +398,7 @@ export function createServer(session: BrowserSession): McpServer {
 
       // 归档：run-record 总是落盘；失败附现场包（截图 + 快照 + trace 副本）
       let screenshot: string | undefined;
-      if (!rec.ok) screenshot = await collector.screenshot().catch(() => undefined);
+      if (!rec.ok && !rec.failure?.retryBlocked) screenshot = await collector.screenshot().catch(() => undefined);
       await archiveRun({ traceName: trace.name, record: rec, trace, screenshotBase64: screenshot });
 
       return { content: [{ type: "text" as const,
@@ -527,7 +528,8 @@ export function createServer(session: BrowserSession): McpServer {
             return fail(`原第 ${index + 1} 步是断言，不可自动修复；断言失败可能是被测系统缺陷，需人工判定。`);
           }
           const gate = checkHealGate({
-            lastFailureKind: evidence?.failures.get(index), budget, stepIndex: index
+            lastFailureKind: evidence?.failures.get(index), budget, stepIndex: index,
+            retryBlocked: evidence?.retryBlocked || lastRun?.failure?.retryBlocked
           });
           if (!gate.ok) return fail(`原第 ${index + 1} 步（stepIndex=${index}）：${gate.reason}`);
         }
@@ -589,7 +591,10 @@ export function createServer(session: BrowserSession): McpServer {
           refLabelTables.set(handle.pageId, refLabels);
         }
         if (outcome.status === "rejected") return fail(notice + outcome.reason);
-        if (outcome.status === "demo-failed") return fail(notice + renderDemoFailure(outcome.failure));
+        if (outcome.status === "demo-failed") {
+          if (outcome.failure.retryBlocked && evidence && healEvidence.get(tracePath) === evidence) evidence.retryBlocked = true;
+          return fail(notice + renderDemoFailure(outcome.failure));
+        }
         const { plan, validation } = outcome;
         const states = assessRepairs(plan, validation).map((repair) => {
           const label = { passed: "已通过", failed: "仍失败", "not-reached": "未完整执行" }[repair.status];
@@ -601,7 +606,8 @@ export function createServer(session: BrowserSession): McpServer {
           const failure = validation.failure;
           // failed candidate 的步号不写入 lastRun；只学习未替换原步骤的失败证据。
           const sameCycle = healEvidence.get(tracePath) === evidence;
-          if (sameCycle && location && location.repairIndex === undefined && failure && HEALABLE_KINDS.has(failure.kind)) {
+          if (sameCycle && failure?.retryBlocked) evidence!.retryBlocked = true;
+          if (sameCycle && location && location.repairIndex === undefined && failure && !failure.retryBlocked && HEALABLE_KINDS.has(failure.kind)) {
             evidence!.failures.set(location.originalIndex, failure.kind);
           }
           const charged = sameCycle && !dryRun && validationCountsAgainstBudget(validation) &&
@@ -623,7 +629,9 @@ export function createServer(session: BrowserSession): McpServer {
           const accounting = charged
             ? `仅原第 ${location!.originalIndex + 1} 步计自愈次数；本轮已用 ${budget.total}/${MAX_HEALS_PER_TRACE}。\n`
             : "未计自愈次数，已有预算保持不变。\n";
-          const repairHint = failure?.kind === "user-interrupted"
+          const repairHint = failure?.retryBlocked
+            ? "本次运行需要人工恢复；请按失败提示恢复页面或连接、snapshot 核实副作用，再 replay 获取新证据。以下参数仅供核对，勿直接重试："
+            : failure?.kind === "user-interrupted"
             ? "保留以下稳定修复步骤；用户操作完成并核实状态后重新提交："
             : "可复用以下稳定修复步骤；补齐其他已确认故障后一起提交：";
           return fail(notice + `❌ ${dryRun ? "dry-run " : ""}修复未通过验证门，trace 未写回。\n` +

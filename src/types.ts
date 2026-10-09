@@ -164,6 +164,8 @@ export type FailureKind =
   | "page-closed";
 
 export interface FailureContext {
+  /** 状态恢复不确定，副作用可能完成；禁止自动重试/自愈。 */
+  retryBlocked?: boolean;
   failedIndex: number;
   failedStep: Step;
   kind: FailureKind;

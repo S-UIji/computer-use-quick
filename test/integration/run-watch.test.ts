@@ -99,7 +99,9 @@ describe("RunWatch（观察模式组装）", () => {
     ], new RunWatch({ handle, label: "探索", watch: true }));
 
     expect(r.ok).toBe(true);
-    expect(r.results.map((s) => s.error ?? "").join("")).not.toMatch(/用户/);
+    expect(r.failure).toBeUndefined();
+    expect(r.results.map((s) => s.error ?? "").join("")).not.toMatch(/用户操作|用户滚动|用户介入/);
+    expect(r.results.find((s) => s.action === "scroll")?.error).toContain("前台滚动");
   });
 
   it("零误报：iframe 内点击与打开新标签的点击", async () => {

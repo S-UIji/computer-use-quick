@@ -34,12 +34,19 @@ export function renderSuiteResult(r: SuiteResult): string {
   }
 
   // 被用户打断的不是页面问题，heal_step 也会拒修，不列入可自愈段
-  const failed = r.results.filter((t) => !t.ok && t.record && !t.interrupted && !t.pageClosed && t.record.failure?.kind !== "page-closed");
+  const failed = r.results.filter((t) => !t.ok && t.record && !t.interrupted && !t.pageClosed && !t.record.failure?.retryBlocked && t.record.failure?.kind !== "page-closed");
   if (failed.length > 0) {
     lines.push("", "## 失败上下文（可接 heal_step 自愈）", "");
     for (const t of failed) {
       lines.push(`### ${t.name}`, "", renderRunRecord(t.record!), "");
     }
+  }
+
+  const blocked = r.results.filter((t) => !t.ok && t.record?.failure?.retryBlocked);
+  if (blocked.length) {
+    lines.push("", "## 需要人工恢复（未自动重试）", "");
+    for (const t of blocked) lines.push(`### ${t.name}`, "", renderRunRecord(t.record!), "");
+    lines.push("请按失败提示恢复页面或连接，并 snapshot 核实副作用，避免直接重试。", "");
   }
 
   const closed = r.results.filter((t) => !t.ok && (t.pageClosed || t.record?.failure?.kind === "page-closed"));

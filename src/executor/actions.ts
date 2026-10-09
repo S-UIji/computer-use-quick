@@ -3,6 +3,7 @@ import type { ResolveResult, RunArtifact, Step, TargetRef, VisualOptions } from 
 import { resolveTarget, type ResolveOptions } from "../locator/resolve.js";
 import { NetworkTracker, waitStable, type StabilityOptions } from "../waiter/stability.js";
 import { waitFor } from "../waiter/explicit.js";
+import { withInputFocus, type InputFocusWarning } from "../session/inputFocus.js";
 import type { InputGate } from "./observer.js";
 
 export interface ActionContext {
@@ -29,6 +30,8 @@ export interface ActionContext {
   onResolved?: (backendNodeId: number) => Promise<void>;
   /** agent 输入登记口（观察模式介入检测用）；未启用时为空，sendInput 直接派发 */
   inputGate?: InputGate;
+  /** 兼容回退或恢复异常的诊断，不包含输入载荷。 */
+  onInputWarning?: (warning: InputFocusWarning) => void;
 }
 
 async function centerOf(
@@ -58,16 +61,6 @@ async function nodeIdFor(
 
 /** 交互类动作要求目标可见可点：命中不可见节点时继续试后面的策略，而不是拿协议错误收场 */
 const ACTIONABLE: ResolveOptions = { requireActionable: true };
-
-/**
- * 派发输入事件前把被驱动的页面提到前台。
- * 实测：后台标签页里的 Input.dispatchMouseEvent 要等 ~5s 才返回（前台 8-46ms），
- * 点开新标签页、或浏览器里还开着别的标签时，每一步都会被拖满这个延迟；
- * Page.bringToFront 一次就把 5022ms 降到 28ms。
- */
-async function bringToFront(handle: PageHandle): Promise<void> {
-  await handle.cdp.send("Page.bringToFront").catch(() => {});
-}
 
 type InputMethod = "Input.dispatchMouseEvent" | "Input.dispatchKeyEvent" | "Input.insertText";
 
@@ -179,7 +172,17 @@ async function readProperty(
   return result.value;
 }
 
+const INPUT_ACTIONS = new Set<Step["action"]>(["click", "fill", "select", "press", "hover", "scroll"]);
+
 export async function runAction(ctx: ActionContext, step: Step): Promise<void> {
+  if (INPUT_ACTIONS.has(step.action)) {
+    return withInputFocus(ctx.handle, () => runActionBody(ctx, step), ctx.onInputWarning,
+      step.action === "scroll" && !step.target);
+  }
+  return runActionBody(ctx, step);
+}
+
+async function runActionBody(ctx: ActionContext, step: Step): Promise<void> {
   const { handle, tracker } = ctx;
 
   switch (step.action) {
@@ -195,13 +198,11 @@ export async function runAction(ctx: ActionContext, step: Step): Promise<void> {
     }
 
     case "click": {
-      await bringToFront(handle);
       await realClick(ctx, await nodeIdFor(ctx, step.target, ACTIONABLE));
       break;
     }
 
     case "fill": {
-      await bringToFront(handle);
       const id = await nodeIdFor(ctx, step.target, ACTIONABLE);
       await handle.cdp.send("DOM.scrollIntoViewIfNeeded", { backendNodeId: id });
       await handle.cdp.send("DOM.focus", { backendNodeId: id });
@@ -218,7 +219,6 @@ export async function runAction(ctx: ActionContext, step: Step): Promise<void> {
     case "select": {
       // 原生 <select> 的下拉是 OS 级控件，CDP 点不开。
       // 这是唯一一处刻意走 JS 赋值的 action，并显式补发 input/change 事件。
-      await bringToFront(handle);
       const id = await nodeIdFor(ctx, step.target, ACTIONABLE);
       const { object } = (await handle.cdp.send("DOM.resolveNode", { backendNodeId: id })) as {
         object: { objectId: string };
@@ -238,21 +238,18 @@ export async function runAction(ctx: ActionContext, step: Step): Promise<void> {
     }
 
     case "press": {
-      await bringToFront(handle);
       await sendInput(ctx, "Input.dispatchKeyEvent", { type: "keyDown", key: step.key });
       await sendInput(ctx, "Input.dispatchKeyEvent", { type: "keyUp", key: step.key });
       break;
     }
 
     case "hover": {
-      await bringToFront(handle);
       const { x, y } = await centerOf(handle, await nodeIdFor(ctx, step.target, ACTIONABLE));
       await sendInput(ctx, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
       break;
     }
 
     case "scroll": {
-      await bringToFront(handle);
       if (step.target) {
         await handle.cdp.send("DOM.scrollIntoViewIfNeeded", {
           backendNodeId: await nodeIdFor(ctx, step.target)

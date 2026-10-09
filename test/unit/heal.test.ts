@@ -219,6 +219,18 @@ describe("heal sidecar", () => {
 });
 
 describe("用户介入与自愈", () => {
+  it("恢复失败拒绝已有定位证据，不消耗预算", () => {
+    const used = budget({ 1: 1 }, 2);
+    const result = checkHealGate({ lastFailureKind: "target-not-found", budget: used, stepIndex: 1, retryBlocked: true });
+    expect(result.ok).toBe(false); if (!result.ok) expect(result.reason).toContain("核实副作用");
+    expect(used.total).toBe(2); expect(used.perStep.get(1)).toBe(1);
+  });
+  it("验证恢复失败不计修复预算，保留原始定位类别", () => {
+    const record = { traceName: "t", startedAt: "", durationMs: 1, ok: false, steps: [], drifts: [], healRequired: false,
+      failure: { retryBlocked: true, failedIndex: 0, failedStep: { action: "sleep" as const, ms: 1 }, kind: "target-not-found" as const, message: "", snapshot: "", consoleErrors: [], failedRequests: [] } };
+    expect(validationCountsAgainstBudget(record)).toBe(false); expect(record.failure.kind).toBe("target-not-found");
+  });
+
   it("上次失败是 user-interrupted：拒修，提示重新 replay，不涉及预算", () => {
     const r = checkHealGate({ lastFailureKind: "user-interrupted", budget: budget(), stepIndex: 0 });
     expect(r.ok).toBe(false);

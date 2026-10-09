@@ -129,7 +129,7 @@ async function attemptOnce(
 
     // 失败现场包：截图必须在 Context release 前抓
     let screenshot: string | undefined;
-    if (!rec.ok) {
+    if (!rec.ok && !rec.failure?.retryBlocked) {
       screenshot = await collector.screenshot().catch(() => undefined);
     }
     await archiveRun({
@@ -180,6 +180,7 @@ async function runOne(opts: RunSuiteOptions, path: string, prepared: PreparedTra
   if (first.ok) return done(first);
   // 用户在场才会被打断：重试大概率再被打断，如实报告即可
   if (isInterrupted(first)) return done({ ...first, interrupted: true });
+  if (first.record?.failure?.retryBlocked) return done(first);
   if (first.pageClosed || first.record?.failure?.kind === "page-closed") return done(first);
   opts.onTraceEvent?.({ kind: "retrying", result: first });
   const second = await attemptOnce(opts, path, "-retry", prepared, slot);

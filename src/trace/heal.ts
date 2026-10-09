@@ -40,7 +40,9 @@ export function checkHealGate(opts: {
   lastFailureKind: FailureKind | undefined;
   budget: HealBudget;
   stepIndex: number;
+  retryBlocked?: boolean;
 }): HealGate {
+  if (opts.retryBlocked) return { ok: false, reason: "当前运行需要人工恢复；请按失败提示恢复页面或连接、snapshot 核实副作用，再 replay 获取新证据（未消耗自愈次数）。" };
   if (opts.lastFailureKind === undefined) {
     return { ok: false, reason: "该原步骤无失败记录或对应证据，无法确认失败类型；请先 replay" };
   }
@@ -90,7 +92,7 @@ export function buildHealedTrace(
 
 /** 验证重放失败是否计入自愈预算：被用户打断不算——那不是修复本身的问题 */
 export function validationCountsAgainstBudget(validation: RunRecord): boolean {
-  return validation.failure?.kind !== "user-interrupted" && validation.failure?.kind !== "page-closed";
+  return !validation.failure?.retryBlocked && validation.failure?.kind !== "user-interrupted" && validation.failure?.kind !== "page-closed";
 }
 
 export interface RunHealOptions {

@@ -143,7 +143,7 @@ export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
     drifts,
     failure,
     // 用户介入或页面关闭不应修改 trace。
-    healRequired: !r.ok && failure?.kind !== "user-interrupted" && failure?.kind !== "page-closed",
+    healRequired: !r.ok && !failure?.retryBlocked && failure?.kind !== "user-interrupted" && failure?.kind !== "page-closed",
     artifacts: r.artifacts.length > 0 ? r.artifacts : undefined
   };
   return redactVariableRecord(record, createVariableRedactor(opts.vars, origins, r.variableRedactions));
