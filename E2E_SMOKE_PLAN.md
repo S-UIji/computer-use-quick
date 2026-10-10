@@ -1,6 +1,6 @@
 # computer-use-quick 全量端到端冒烟计划
 
-首次执行：2026-09-30；状态更新：2026-10-09
+首次执行：2026-09-30；状态更新：2026-10-10
 目标：用真实有头 Chrome、真实 MCP stdio 客户端和旁路“用户”连接，验证从探索到回放、自愈、并发、观察模式和浏览器生命周期的完整链路，并把模型/用户实际会遇到的不舒服之处记录成可修复的问题。
 
 ## 执行原则
@@ -104,7 +104,7 @@ node scripts/e2e-smoke.mjs
 | BUG-10 | 被打断结果没有“先确认用户完成，再 snapshot，再从第 N 步重提”的下一步指引 | R15 已验收，随本次提交交付：按工具给出等待、核实与恢复指引，推送真实停止步号 |
 | BUG-11 | 所有失败现场都带 `favicon.ico` 404；suite 确定性定位失败仍完整重试 | R16/R17，噪音和等待成本都偏高 |
 | BUG-12 | 旧 `.scratch/ci-env.json` 指向已死 Chrome 时，`ci-harness up` 直接拒绝 | R18 已在 `23dead8` 修复并推送：过期环境自动清理，有效环境仍阻止重复启动 |
-| BUG-13 | 旧 `.scratch/e2e-smoke.mjs` 使用外部 `localhost:3040` 的只读 `traces/smoke-login.json`，第 5 步容器锚定匹配到 30 个同名按钮，初次 suite 为 0/2 | 外部靶场的容器锚定歧义仍未解决；不能归因为 BUG-02 的重复订单，也不能用新隔离冒烟通过证明它已修复 |
+| BUG-13 | 旧 `.scratch/e2e-smoke.mjs` 使用外部 `localhost:3040` 的只读 `traces/smoke-login.json`，第 5 步容器锚定匹配到 30 个同名按钮，初次 suite 为 0/2 | 2026-10-10现场验收闭环：旧聚合目标已过期，当前30卡片容器锚定和真实行消歧通过；详见本文最新验收 |
 
 ## 已完成修复与当前基线（2026-10-08）
 
@@ -119,7 +119,7 @@ node scripts/e2e-smoke.mjs
 - R8 的 headless 隔离闭环连续两轮通过，复跑墙钟 2465ms、2578ms。提示在 batch 响应中返回，不会自动阻断动作；同 URL 刷新/纯 DOM 变化不检测，旧 ref 跨导航后也不保证必然失效。
 - R4 已在 `47f7a60` 提交并推送，规范归档至 `2026-10-08-fix-snapshot-structure`；全量 60 个文件 / 470 个测试通过。新增 23 项结构/真实浏览器用例，覆盖叶子不重折叠、语义行及 LayoutTableRow、重复列值、嵌套子组、公共字段、expand 和定位。
 - 两轮有头 MCP 验证均直接点击六个工具栏按钮，并展开数据行后点击 ORD-002 的删除按钮；两轮 headless 隔离冒烟均完成自愈和复跑全绿（复跑墙钟 2530ms、2443ms）。
-- 外部 `localhost:3040` 的容器锚定问题及已记录的有头并发输入耗时继续独立跟踪。
+- 外部 `localhost:3040` 容器锚定于2026-10-10完成现场兼容验收；旧有头并发输入耗时继续独立跟踪。
 
 ## 修复优先级
 
@@ -314,6 +314,21 @@ node scripts/e2e-smoke.mjs
 
 证据：.scratch/deadline-full-delivery.log、deadline-final-build-ax.log、deadline-waiter-root-cause.md、deadline-waiter-first-four-green.log、deadline-ax-scoped-green.log、deadline-review-visual-verified.log、deadline-core-last-green.log、deadline-smoke.log、deadline-smoke-wrapper.log；.scratch/deadline-evidence/四个final轮的evidence.json、final-summary.json和本地截图。完整报告：docs/execution-deadlines-fix-2026-10-10.md；剩余清单：docs/remaining-work-2026-10-10.md。
 
+## 外部3040同名按钮现场验收（2026-10-10）
+
+结论：旧 `traces/smoke-login.json` 第5步是过期聚合场景。现页面“教育事业群”总览banner没有“查看在岗干部明细”按钮，扩大到父总览才出现30个同名目标；返回ambiguous并停止点击正确。本次不改产品定位器，不把原目标偷换成任意子部门。
+
+- 两轮有头、两轮headless，每轮213项，共852项通过。每轮30张真实卡片自动生成的首选容器策略返回原按钮backend；真实MCP逐卡打开/关闭，共120次明细打开。
+- 30张卡片有29种完整名称，因此不能只看dialog标题。每张卡同时对应overview中的唯一部门编码，明细GET路径全部使用预期编码。
+- 每轮真实表格13个唯一工号行，重复性别标签6男7女；前12个row-role-name返回原物理cell backend并核对所属行，共48次物理单元格验证。行身份摘要只使用工号哈希。
+- 先验证HTTP成功、业务code=0和overview/tree必要结构，再核对前后数据SHA256一致。完整请求记录后验确认每轮仅本轮登录/注销两次同源POST，无业务写尝试；logout=200，全部专属profile清理。
+- 原trace SHA256保持不变；保存新生成的当前卡片只读trace供参考。本次证明现场生成语义锚点与batch兼容，未声明原聚合trace通过或新持久trace跨会话replay通过。
+- 55份编译JS与21425b4交付验收哈希一致。产品源码、测试、外部应用源码均无修改，因此不重复与文档无关的983项全量；上一产品交付为101文件/983通过。
+- 早期探测与加强前111项轮次全部保留。最终四轮使用`.scratch/live3040-verified.executed.mjs`；`acceptance.json`按严格POST白名单重新审计实际完整请求。未来重跑入口`.scratch/live3040-verified.mjs`也已明确限制POST方法。
+- 该附带项已闭环，剩5项现场验证：旧约63秒有头并行填写、Claude实际进度UI、其他应用OS焦点、真实LLM介入恢复、R16一次Target.createTarget失败原因。
+
+最终证据：`.scratch/live3040-verified/aggregate.json`、`acceptance.json`、各轮MCP返回与截图；构建绑定：`.scratch/live3040-build-hashes.json`。详细报告：`docs/live3040-locator-verification-2026-10-10.md`。
+
 ## 每次修复的验收门槛
 
 - 相关单元/集成测试全绿。
@@ -321,3 +336,4 @@ node scripts/e2e-smoke.mjs
 - 失败场景必须验证错误类型、文案、当前 URL、候选信息和进度通知，而不是只看退出码。
 - 有头场景必须检查截图和窗口边界；headless 场景必须再跑一次，确保观察模式改动没有污染 CI。
 - 所有结果可由 `log.md`、截图和 `SUITE_RESULT` 收尾行复核。
+
