@@ -31,6 +31,7 @@ afterAll(async () => { await session?.close(); });
 describe("观察模式的小狐狸", () => {
   it("严格 CSP 下显示固定尺寸的内嵌狐狸，更新状态不请求图片", async () => {
     await handle.page.goto(`${fixtureURL}/csp.html`, { waitUntil: "load" });
+    await handle.page.waitForNetworkIdle({ idleTime: 100, timeout: 3000 });
     const requests: string[] = [];
     const onRequest = (request: { url(): string }) => { requests.push(request.url()); };
     handle.page.on("request", onRequest);
@@ -53,7 +54,7 @@ describe("观察模式的小狐狸", () => {
       expect(view.width).toBe("24px");
       expect(view.height).toBe("24px");
       expect(view.drawn).toBe(true);
-      expect(view.label).toContain("正在操作 · 探索 · 第 1/3 步");
+      expect(view.label).toContain("正在操作 · 1/3");
       expect(view.label).not.toContain("🤖");
       expect(view.externalImages).toBe(0);
       expect(requests).toEqual([]);
@@ -89,7 +90,7 @@ describe("观察模式的小狐狸", () => {
       };
     });
     expect(continuity).toMatchObject({ sameFox: true, sameAnimation: true, sameStart: true, progressed: true });
-    expect(continuity.label).toContain("第 2/3 步");
+    expect(continuity.label).toContain("2/3");
   });
 
   it.each<OverlayState>([active(), { kind: "idle" }])("截图临时隐藏 $kind 标注时保留狐狸和动画进度", async (state) => {

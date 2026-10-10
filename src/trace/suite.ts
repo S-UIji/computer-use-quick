@@ -114,7 +114,7 @@ function traceObserver(opts: RunSuiteOptions, info: TraceProgressInfo, observer?
   return {
     inputGate: observer?.inputGate,
     onRunStart: async total => { await observer?.onRunStart(total); },
-    onStepStart: async (index, step, description) => { await observer?.onStepStart(index, step, description); },
+    onStepStart: async (index, step, description, details) => { await observer?.onStepStart(index, step, description, details); },
     onStepEnd: async result => {
       await observer?.onStepEnd(result);
       executionCheckpoint();

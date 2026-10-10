@@ -57,8 +57,8 @@ function remapObserver(obs: StepObserver, realIndex: number[], total: number): S
   return {
     inputGate: obs.inputGate,
     onRunStart: () => obs.onRunStart(total),
-    onStepStart: async (i, step, description) => {
-      if (realIndex[i] !== -1) await obs.onStepStart(realIndex[i], step, description);
+    onStepStart: async (i, step, description, details) => {
+      if (realIndex[i] !== -1) await obs.onStepStart(realIndex[i], step, description, details);
     },
     onStepEnd: async (r) => {
       if (realIndex[r.index] !== -1) await obs.onStepEnd({ ...r, index: realIndex[r.index] });

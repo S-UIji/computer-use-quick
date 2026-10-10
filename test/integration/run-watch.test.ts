@@ -62,7 +62,9 @@ describe("RunWatch（观察模式组装）", () => {
       { action: "wait", until: { type: "visible", target: css("#late") }, timeout: 8000 }
     ], new RunWatch({ handle, label: "探索", watch: true }));
 
-    expect(await pollBadge("第 2/2 步 等待")).toContain("探索");
+    expect(await pollBadge("2/2")).toContain("详情");
+    expect(await evalValue<string>(`window.__cuqOverlay.details.textContent`)).toContain("探索");
+    expect(await evalValue<string>(`window.__cuqOverlay.details.textContent`)).toContain("等待");
     expect(await evalValue<string>(`window.__cuqOverlay.wrap.getAttribute("data-state")`)).toBe("active");
     expect((await p).ok).toBe(true);
     expect(await evalValue<string>(`window.__cuqOverlay.badge.textContent`)).toBe(renderBadgeText({ kind: "idle" }));
@@ -75,7 +77,7 @@ describe("RunWatch（观察模式组装）", () => {
       { action: "fill", target: css("#name"), value: "不该被填" }
     ], new RunWatch({ handle, label: "探索", watch: true }));
 
-    await pollBadge("第 2/3 步 等待");
+    await pollBadge("2/3");
     await rawClick(300, 400);
     const r = await p;
     expect(r.ok).toBe(false);

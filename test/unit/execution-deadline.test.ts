@@ -1,3 +1,4 @@
+import { runInNewContext } from "node:vm";
 import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PageHandle } from "../../src/session/browser.js";
@@ -85,6 +86,33 @@ describe("ExecutionContext", () => {
     late.resolve({}); await vi.advanceTimersByTimeAsync(0);
     await expect(runWithDeadline(handle, 100, () => handle.cdp.send("Page.navigate", { url: "about:blank" }))).resolves.toEqual({});
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("quarantine permits only an identity-checked overlay release and keeps generic JS blocked", async () => {
+    vi.useFakeTimers();
+    const pending = deferred<any>();
+    const attributes = new Set(["data-agent-input"]);
+    const overlay = { inputOwner: "owned", cancelledInputThrough: 0, inputLocks: new Set([7]),
+      wrap: { removeAttribute: (name:string) => attributes.delete(name) } };
+    const { handle } = fakeHandle(async (method, params) => {
+      if (method === "Page.navigate") return pending.promise;
+      if (method === "Runtime.evaluate") return { result: { value: runInNewContext(params.expression, { window: { __cuqOverlay: overlay } }) } };
+      return {};
+    });
+    const running = runWithDeadline(handle, 100, () => handle.cdp.send("Page.navigate", {url:"about:blank"}));
+    const rejected = expect(running).rejects.toBeInstanceOf(ExecutionDeadlineError);
+    await vi.advanceTimersByTimeAsync(100); await rejected;
+    const finalizer = new FinalizationBudget(handle);
+    await expect(finalizer.run(() => handle.cdp.send("Runtime.evaluate", { expression:"window.changed=true", returnByValue:true })))
+      .rejects.toBeInstanceOf(ExecutionQuarantinedError);
+    await finalizer.restoreOverlayInput("another-owner", 7);
+    expect(attributes.has("data-agent-input")).toBe(true);
+    await finalizer.restoreOverlayInput("owned", 7);
+    expect(attributes.has("data-agent-input")).toBe(false);
+    expect(overlay.cancelledInputThrough).toBe(7);
+    await expect(finalizer.run(() => handle.cdp.send("Input.insertText", {text:"forbidden"})))
+      .rejects.toBeInstanceOf(ExecutionQuarantinedError);
+    finalizer.dispose();pending.resolve({});await vi.advanceTimersByTimeAsync(0);expect(vi.getTimerCount()).toBe(0);
   });
 
   it("a close event interrupts a hung task before its deadline", async () => {

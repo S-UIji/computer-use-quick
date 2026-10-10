@@ -4,6 +4,7 @@ import { resolveTarget, type ResolveOptions } from "../locator/resolve.js";
 import { NetworkTracker, waitStable, type StabilityOptions } from "../waiter/stability.js";
 import { waitFor } from "../waiter/explicit.js";
 import { withInputFocus, type InputFocusWarning } from "../session/inputFocus.js";
+import { withOverlayDetailsSuspended } from "../watch/overlay.js";
 import type { InputGate } from "./observer.js";
 import { assertExecutionReady, executionCheckpoint, executionSleep } from "./deadline.js";
 
@@ -78,7 +79,11 @@ async function sendInput(ctx: ActionContext, method: InputMethod, params: Record
     : undefined;
   const done = ctx.inputGate?.begin(kind, point);
   try {
-    await (ctx.handle.cdp as unknown as { send(m: string, p: object): Promise<unknown> }).send(method, params);
+    const dispatch = async (): Promise<void> => {
+      await (ctx.handle.cdp as unknown as { send(m: string, p: object): Promise<unknown> }).send(method, params);
+    };
+    if (kind === "wheel") await withOverlayDetailsSuspended(ctx.handle, dispatch);
+    else await dispatch();
   } finally {
     done?.();
   }

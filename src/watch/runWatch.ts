@@ -56,12 +56,12 @@ export class RunWatch implements StepObserver {
     if (this.monitor.installError) this.setupWarning = `介入检测未能启用：${this.monitor.installError}`;
   }
 
-  async onStepStart(index: number, step: Step, preparedDescription?: string): Promise<void> {
+  async onStepStart(index: number, step: Step, preparedDescription?: string, preparedDetails?: string): Promise<void> {
     const description = preparedDescription ?? describeStep(step, this.opts.refLabels);
     this.descriptions.set(index, description);
     if (!this.monitor) return;
     await showOverlay(this.opts.handle, {
-      kind: "active", label: this.opts.label, step: index + 1, total: this.total, action: step.action, description
+      kind: "active", label: this.opts.label, step: index + 1, total: this.total, action: step.action, description, details: preparedDetails ?? description
     });
   }
 

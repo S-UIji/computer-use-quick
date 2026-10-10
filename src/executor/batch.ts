@@ -168,6 +168,8 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined, fi
   const variableRedactions: VariableTextMapping[] = [];
   const activeEnvironment = new Set(opts.environmentNames);
   const descriptionOrigins = inspectVariables(opts.steps, opts.vars, opts.environmentNames).environmentUsed;
+  const detailsOrigins = new Set(descriptionOrigins);
+  const detailsRedactions: VariableTextMapping[] = [];
   let committedVars = baseContext.vars;
   let committedArtifacts = baseContext.artifacts ?? [];
   let finalizationRisk = false;
@@ -208,8 +210,15 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined, fi
         assertPageOpen(opts.handle);
         const step = interpolateStep(raw, ctx.vars);
         variableRedactions.push(...variableFieldMappings(raw, step, activeEnvironment));
-        description = describeStep(raw, opts.refLabels, createVariableRedactor(opts.vars, descriptionOrigins, variableRedactions));
-        await obs?.onStepStart(i, raw, description);
+        const redactDescription = createVariableRedactor(opts.vars, descriptionOrigins, variableRedactions);
+        description = describeStep(raw, opts.refLabels, redactDescription);
+        for (const name of inspectVariables([raw], ctx.vars, new Set(Object.keys(ctx.vars))).environmentUsed) {
+          detailsOrigins.add(name);
+          detailsRedactions.push({ value: ctx.vars[name], source: "$" + "{" + name + "}" });
+        }
+        detailsRedactions.push(...variableFieldMappings(raw, step, new Set(Object.keys(ctx.vars))));
+        const redactDetails = createVariableRedactor(ctx.vars, [...detailsOrigins], [...variableRedactions, ...detailsRedactions]);
+        await obs?.onStepStart(i, raw, description, describeStep(raw, opts.refLabels, redactDetails, Infinity));
         executionCheckpoint();
         dialogs?.setStep(step);
         // ref 是单次快照内的短期句柄，不能进 trace，要固化成长期 descriptor。

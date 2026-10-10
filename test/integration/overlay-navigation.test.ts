@@ -15,7 +15,8 @@ describe("导航标注恢复",()=>{
     await watch.onRunStart(3);await watch.onStepStart(0,{action:"navigate",url:"/watch.html"});
     await handle.page.goto(inject("fixtureURL")+"/watch.html?active");
     await restored("active");
-    expect((await state())?.text).toContain("第 1/3 步 导航到");
+    expect((await state())?.text).toContain("1/3");
+    expect(await handle.page.evaluate(()=>(window as any).__cuqOverlay.details.textContent)).toContain("导航到");
     await watch.onRunEnd({ok:true,interrupted:false});
   });
   it.each<OverlayState>([{kind:"idle"},{kind:"interrupted",stopStep:3}])("结束状态 $kind 在用户跳转后恢复",async(s)=>{

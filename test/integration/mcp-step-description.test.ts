@@ -8,8 +8,8 @@ describe("MCP可读动作说明",()=>{
 it("环境值出现在标签时，角标、进度、台账在截断前脱敏",async()=>{
 const secret="r11-secret-"+"x".repeat(110);await page.$eval("#user",(n,value)=>n.setAttribute("aria-label","账户 "+value),secret);const target=await ref(page,"账户 r11-secret-");const progress:any[]=[];
 const running=client.callTool({name:"batch",arguments:{pageId:id(page),steps:[{action:"fill",target:{ref:target},value:"$"+"{R11_TOKEN}"}]}},undefined,{onprogress:p=>progress.push(p)});
-await page.waitForFunction(()=>(window as any).__cuqOverlay?.badge.textContent.includes("填写"),{timeout:5000});
-const badge=await page.evaluate(()=>(window as any).__cuqOverlay.badge.textContent);await running;
+await page.waitForFunction(()=>(window as any).__cuqOverlay?.details.textContent.includes("填写"),{timeout:5000});
+const badge=await page.evaluate(()=>(window as any).__cuqOverlay.details.textContent);await running;
 expect(badge).toContain("$"+"{R11_TOKEN}");expect(badge).not.toContain("r11-secret-");expect(progress.map(p=>p.message).join("\n")).toContain("$"+"{R11_TOKEN}");expect(progress.map(p=>p.message).join("\n")).not.toContain("r11-secret-");
 await client.callTool({name:"save_trace",arguments:{pageId:id(page),name:"r11-redacted",baseUrl:inject("fixtureURL"),dir:work}});
 const replay=await client.callTool({name:"replay",arguments:{pageId:id(page),tracePath:join(work,"r11-redacted.json")}});
@@ -28,8 +28,8 @@ expect(next.isError).not.toBe(true);expect(await page.$eval("#user",n=>(n as HTM
 it("角标、进度和台账说明同一目标，并隐藏填写值",async()=>{
 const target=await ref(page,"用户名");const progress:any[]=[];
 const running=client.callTool({name:"batch",arguments:{pageId:id(page),steps:[{action:"fill",target:{ref:target},value:"r11-private-value"},{action:"sleep",ms:650}]}},undefined,{onprogress:p=>progress.push(p)});
-await page.waitForFunction(()=>(window as any).__cuqOverlay?.badge.textContent.includes("填写"),{timeout:5000});
-const badge=await page.evaluate(()=>(window as any).__cuqOverlay.badge.textContent);expect(badge).toContain("用户名");expect(badge).not.toContain("r11-private-value");await running;
+await page.waitForFunction(()=>(window as any).__cuqOverlay?.details.textContent.includes("填写"),{timeout:5000});
+const badge=await page.evaluate(()=>(window as any).__cuqOverlay.details.textContent);expect(badge).toContain("用户名");expect(badge).not.toContain("r11-private-value");await running;
 expect(progress.some(p=>p.message?.includes("填写")&&p.message?.includes("用户名"))).toBe(true);expect(progress.map(p=>p.message).join("\n")).not.toContain("r11-private-value");
 await client.callTool({name:"save_trace",arguments:{pageId:id(page),name:"r11-readable",baseUrl:inject("fixtureURL"),dir:work}});
 const replay=await client.callTool({name:"replay",arguments:{pageId:id(page),tracePath:join(work,"r11-readable.json")}});

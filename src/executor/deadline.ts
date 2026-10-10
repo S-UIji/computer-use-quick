@@ -126,7 +126,8 @@ interface ExecutionDomain {
   handle: PageHandle;
   context: ExecutionContext;
   finalizer: FinalizationBudget;
-  mode: "action" | "finalize" | "focus-restore" | "notification" | "probe";
+  mode: "action" | "finalize" | "focus-restore" | "notification" | "probe" | "overlay-restore";
+  overlayReleaseExpression?: string;
   pending: Set<Promise<unknown>>;
   cleanups: Set<() => Promise<void>>;
   cleanupWork: Set<Promise<void>>;
@@ -152,6 +153,19 @@ const READ_COMMANDS = new Set([
   "DOM.requestNode", "DOM.querySelector", "DOM.querySelectorAll", "Accessibility.getFullAXTree",
   "Runtime.releaseObject", "Runtime.releaseObjectGroup", "Target.getTargetInfo"
 ]);
+function overlayReleaseExpression(owner: string, serial: number): string {
+  if (typeof owner !== "string" || !Number.isSafeInteger(serial) || serial < 1) throw new Error("Invalid overlay release identity");
+  return `(function () {
+    var o = window.__cuqOverlay;
+    if (o && o.inputOwner === ${JSON.stringify(owner)}) {
+      o.cancelledInputThrough = Math.max(o.cancelledInputThrough, ${serial});
+      o.inputLocks.delete(${serial});
+      if (!o.inputLocks.size) o.wrap.removeAttribute("data-agent-input");
+    }
+    return true;
+  })()`;
+}
+
 type SendSession = { send: (...args: any[]) => Promise<any> };
 const guardedSessions = new WeakMap<object, { wrapper: SendSession["send"] }>();
 function guardSession(handle: PageHandle, session: SendSession | undefined): void {
@@ -166,11 +180,14 @@ function guardSession(handle: PageHandle, session: SendSession | undefined): voi
       if (own?.mode === "notification") throw new PageClosedError(own.handle.pageId);
       const state = stateFor(handle);
       const isRestore = own?.handle === handle && own.mode === "focus-restore" && args[0] === "Emulation.setFocusEmulationEnabled" && args[1]?.enabled === false;
-      if (own && (state.focusUnknown || state.pending.size) && !isRestore && !READ_COMMANDS.has(args[0])) {
+      const isOverlayRestore = own?.handle === handle && own.mode === "overlay-restore" && args[0] === "Runtime.evaluate" &&
+        args[1]?.expression === own.overlayReleaseExpression && args[1]?.returnByValue === true;
+      if (own && (state.focusUnknown || state.pending.size) && !isRestore && !isOverlayRestore && !READ_COMMANDS.has(args[0])) {
         throw new ExecutionQuarantinedError();
       }
       if (own?.mode === "probe" && !READ_COMMANDS.has(args[0])) throw new ExecutionQuarantinedError();
       if (own?.mode === "focus-restore" && !isRestore) throw new ExecutionQuarantinedError();
+      if (own?.mode === "overlay-restore" && !isOverlayRestore) throw new ExecutionQuarantinedError();
     } catch (error) { return Promise.reject(error); }
     let sent: Promise<any>;
     try { sent = Promise.resolve(original.apply(this, args)); } catch (error) { return Promise.reject(error); }
@@ -215,6 +232,20 @@ export class FinalizationBudget {
     const work = domains.run(domain, () => Promise.resolve().then(() => { executionCheckpoint(); return task(); }));
     return this.context.race(work);
   }
+  /** Only the fixed, identity-checked overlay release script can cross quarantine. */
+  async restoreOverlayInput(owner: string, serial: number): Promise<unknown> {
+    const expression = overlayReleaseExpression(owner, serial);
+    if (!this.context) {
+      this.context = createExecutionContext(this.timeoutMs);
+      this.handle.page.on?.("close", this.closed);
+    }
+    assertExecutionPageOpen(this.handle);
+    const domain: ExecutionDomain = { handle: this.handle, context: this.context, finalizer: this,
+      mode: "overlay-restore", overlayReleaseExpression: expression, pending: new Set(), cleanups: new Set(), cleanupWork: new Set() };
+    installGuards(this.handle);
+    const work = domains.run(domain, () => this.handle.cdp.send("Runtime.evaluate", { expression, returnByValue: true }));
+    return this.context.race(work);
+  }
   /** A closed page still needs non-CDP completion notifications; keep the original grace deadline. */
   async runObserver<T>(task: () => Promise<T>): Promise<T> {
     if (!executionPageClosed(this.handle)) return this.run(task);
@@ -255,6 +286,13 @@ export function withExecutionCleanup<T>(handle: PageHandle, task: () => Promise<
   const domain = domains.getStore();
   if (domain?.handle === handle && domain.context.signal.aborted) return domain.finalizer.run(task, "focus-restore");
   return task();
+}
+
+/** Restore our own decorative input guard within the existing finalization budget. */
+export function restoreOverlayInput(handle: PageHandle, owner: string, serial: number): Promise<unknown> {
+  const domain = domains.getStore();
+  if (domain?.handle === handle && domain.context.signal.aborted) return domain.finalizer.restoreOverlayInput(owner, serial);
+  return handle.cdp.send("Runtime.evaluate", { expression: overlayReleaseExpression(owner, serial), returnByValue: true });
 }
 
 /** The timed-out task retains its expired ALS domain, so a late continuation can never dispatch again. */

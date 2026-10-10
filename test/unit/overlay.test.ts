@@ -2,9 +2,9 @@ import { describe, it, expect } from "vitest";
 import { renderBadgeText } from "../../src/watch/overlay.js";
 
 describe("renderBadgeText 角标文案", () => {
-  it("执行中：标签、步号、动作", () => {
+  it("执行中：紧凑状态和步数", () => {
     expect(renderBadgeText({ kind: "active", label: "smoke-login", step: 3, total: 16, action: "click" }))
-      .toBe("computer-use-quick 正在操作 · smoke-login · 第 3/16 步 click · 请勿操作页面");
+      .toBe("正在操作 · 3/16 · 悬停详情");
   });
 
   it("待命", () => {

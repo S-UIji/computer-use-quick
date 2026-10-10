@@ -9,9 +9,9 @@ const ACTIONS: Record<Step["action"], string> = {
 export function describeAction(action: Step["action"]): string {
   return typeof action === "string" && Object.hasOwn(ACTIONS, action) ? ACTIONS[action] : "执行";
 }
-function compact(text: string): string {
+function compact(text: string, limit: number): string {
   const value = text.replace(/\s+/g, " ").trim();
-  return value.length > 70 ? value.slice(0, 70) + "…" : value;
+  return value.length > limit ? value.slice(0, limit) + "…" : value;
 }
 function route(value: string): string {
   if (!value) return "当前页面";
@@ -41,10 +41,10 @@ function targetName(target: TargetRef | undefined, labels: ReadonlyMap<string, s
   return first && "value" in first ? shorten(first.value) : "元素";
 }
 /** 描述是尽力而为的观察信息；先脱敏再截断，不能阻断真实动作。 */
-export function describeStep(step: Step, labels?: ReadonlyMap<string, string>, redact: VariableRedactor = (text) => text): string {
+export function describeStep(step: Step, labels?: ReadonlyMap<string, string>, redact: VariableRedactor = (text) => text, limit = 70): string {
   if (!step || typeof step !== "object") return "执行";
   try {
-    const shorten = (text: unknown) => compact(redact(typeof text === "string" ? text : ""));
+    const shorten = (text: unknown) => compact(redact(typeof text === "string" ? text : ""), limit);
     const target = () => "「" + targetName("target" in step ? step.target : undefined, labels, shorten) + "」";
     const url = (value: unknown) => shorten(route(redact(typeof value === "string" ? value : "")));
     switch (step.action) {
