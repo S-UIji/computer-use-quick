@@ -264,6 +264,25 @@ node scripts/ci-harness.mjs gate   # 对 ./traces/*.json 终判，退出码 0/1�
 
 本地要跑可重复的二期闭环冒烟：`node scripts/e2e-smoke.mjs`。它自带随机端口的临时 SUT，连续两轮验证 `replay_suite → heal_step → replay_suite`；运行前先 `node scripts/ci-harness.mjs up`，结束后 `node scripts/ci-harness.mjs down`。
 
+## UX 全场景冒烟
+
+```bash
+npm run test:ux                # 有头；可观察角标和用户介入
+npm run test:ux -- --headless   # 无头；可用于持续回归
+```
+
+无需先启动浏览器。脚本自建随机回环端口的内存订单站点、独立 Chrome profile 和本轮证据目录，
+不连接现有浏览器，也不读写业务站点数据。支持 `CUQ_UX_CHROME_PATH` 指定 Chrome 可执行文件。
+报告位于 `.scratch/e2e-ux/run-*/summary.json`；每轮保留日志、截图、trace 和运行记录，失败或清理失败返回非零退出码。
+
+覆盖登录、快照、用户介入及继续、待命导航、后台操作、关闭标签、敏感数据拒存、
+固化与回放、缺变量前置检查、定位漂移自愈、三并发、confirm 弹窗和关闭重连。
+headless 下观察模式关闭，人工介入场景验证输入后续流程；真实介入判定在有头模式验证。
+被浏览器遮住的后台页面不为截图切到前台。S9 只重启本轮浏览器，重连前核对端点身份。
+
+旧本地入口 `node .scratch/e2e-ux.mjs` 应更新为转发至 `scripts/e2e-ux.mjs`，
+旧脚本不再直接运行；其他工作区可直接使用上述 npm 入口。
+
 ## 观察模式（有头时自动启用）
 
 连接的是有头 Chrome 时，服务端自动进入观察模式（`CUQ_WATCH=auto`，可设 `on` / `off` 覆盖）：
@@ -326,7 +345,7 @@ SIGTERM、Ctrl+C）或调用 `BrowserSession.close()` 时会先撤掉所有标�
 ## 开发
 
 ```bash
-npm test                  # 先 tsc 构建再跑全部（97 个文件 / 950 个测试）
+npm test                  # 先 tsc 构建再跑全部（98 个文件 / 961 个测试）
 npm run test:unit         # 纯函数单测，毫秒级
 npm run test:integration  # 需真实 Chrome
 ```

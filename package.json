@@ -10,7 +10,8 @@
     "test": "tsc && vitest run",
     "test:unit": "vitest run test/unit",
     "test:integration": "tsc && vitest run test/integration",
-    "bench": "tsc -p tsconfig.bench.json && node dist-bench/test/bench/cli.js"
+    "bench": "tsc -p tsconfig.bench.json && node dist-bench/test/bench/cli.js",
+    "test:ux": "npm run build && node scripts/e2e-ux.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
