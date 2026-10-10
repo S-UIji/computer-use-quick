@@ -1,3 +1,4 @@
+import { executionCheckpoint, executionSleep } from "../executor/deadline.js";
 import type { PageHandle } from "../session/browser.js";
 import type { Descriptor, ResolveResult, Strategy, TargetRef } from "../types.js";
 import { markAncestors, clearMarks, callOnDocument } from "./container.js";
@@ -62,11 +63,19 @@ async function byAx(
   role: string,
   name: string
 ): Promise<StrategyMatch> {
-  const { nodes } = (await handle.cdp.send("Accessibility.queryAXTree", {
+  // A background renderer can leave queryAXTree's asynchronous lifecycle callback queued.
+  // Issue one scoped query, then synchronously update that same AX scope to release its callback.
+  executionCheckpoint();
+  const query = handle.cdp.send("Accessibility.queryAXTree", {
     nodeId: scopeNodeId,
     accessibleName: name,
     role
-  })) as { nodes: Array<{ backendDOMNodeId?: number; ignored?: boolean }> };
+  }) as Promise<{ nodes: Array<{ backendDOMNodeId?: number; ignored?: boolean }> }>;
+  void query.catch(() => {});
+  executionCheckpoint();
+  await handle.cdp.send("Accessibility.getPartialAXTree", { nodeId: scopeNodeId, fetchRelatives: false });
+  executionCheckpoint();
+  const { nodes } = await query;
   const hits = nodes.filter((n) => !n.ignored && n.backendDOMNodeId !== undefined);
   return {
     id: hits.length === 1 ? hits[0].backendDOMNodeId! : null,
@@ -272,13 +281,14 @@ export async function resolve(
   const deadline = Date.now() + (opts.retryMs ?? 0);
 
   for (;;) {
+    executionCheckpoint();
     try {
       return await resolveOnce(handle, d, opts);
     } catch (err) {
       // target-not-found 与 ambiguous 都可能是渲染中途态，值得重试；
       // 其它异常（协议错误等）重试无意义，直接抛
       if (!(err instanceof LocatorError) || Date.now() >= deadline) throw err;
-      await new Promise((r) => setTimeout(r, 100));
+      await executionSleep(100);
     }
   }
 }

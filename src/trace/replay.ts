@@ -1,9 +1,14 @@
 import type { PageHandle } from "../session/browser.js";
-import type { NetworkTracker } from "../waiter/stability.js";
-import type { DiagnosticsCollector } from "../diagnostics/collector.js";
+import { NetworkTracker } from "../waiter/stability.js";
+import { DiagnosticsCollector } from "../diagnostics/collector.js";
 import type { RunRecord, Trace, Step, Descriptor, VisualOptions } from "../types.js";
 import type { StepObserver } from "../executor/observer.js";
 import { runBatch } from "../executor/batch.js";
+import { runWithDeadline, assertExecutionReady, validateStepTimeoutMs, ExecutionDeadlineError, ExecutionQuarantinedError } from "../executor/deadline.js";
+import { PageInitializationDeadlineError } from "../session/pageInitialization.js";
+import { PageClosedError } from "../session/pageErrors.js";
+import { displayPageUrl } from "../session/pageUrl.js";
+import { applyAuth, type AuthState } from "../session/auth.js";
 import { assertVariables, inspectVariables } from "../executor/variables.js";
 import { createVariableRedactor, redactVariableRecord } from "../report/variablePrivacy.js";
 
@@ -18,6 +23,8 @@ export interface ReplayOptions {
   slowMoMs?: number;
   /** 目标解析的轮询重试预算（ms），默认 3000；传 0 恢复一次性解析 */
   resolveRetryMs?: number;
+  /** 单步骤整体执行预算，默认 30000ms。 */
+  stepTimeoutMs?: number;
   /** 视觉断言链路配置（screenshot-match 基线归属与更新模式） */
   visual?: VisualOptions;
   /** 步骤生命周期钩子（标注 / 进度 / 介入检测），看到的是 trace 真实步序号 */
@@ -77,7 +84,61 @@ export function pageClosedRecord(trace: Trace, message: string, startedAt: numbe
   };
 }
 
+/** 采集器、网络追踪与认证注入共享一个准备预算；迟到的 CDP 续链由执行域阻止。 */
+export async function prepareExecution(handle: PageHandle, auth?: AuthState): Promise<{
+  tracker: NetworkTracker; collector: DiagnosticsCollector;
+}> {
+  return runWithDeadline(handle, 2000, async () => {
+    assertExecutionReady(handle);
+    const collector = await DiagnosticsCollector.attach(handle);
+    const tracker = await NetworkTracker.attach(handle);
+    if (auth) await applyAuth(handle, auth);
+    return { tracker, collector };
+  });
+}
+
+/** 准备阶段尚未执行任何步骤；关闭与截止失败均生成不可自愈台账。 */
+export function preparationFailureRecord(
+  trace: Trace, error: unknown, startedAt: number, handle?: PageHandle
+): RunRecord | undefined {
+  if (error instanceof PageClosedError || handle?.page.isClosed()) {
+    return pageClosedRecord(trace, error instanceof PageClosedError ? error.message : new PageClosedError(handle!.pageId).message, startedAt);
+  }
+  if (!(error instanceof ExecutionDeadlineError) && !(error instanceof ExecutionQuarantinedError) && !(error instanceof PageInitializationDeadlineError)) return undefined;
+  let currentUrl: string | undefined;
+  try { if (handle) currentUrl = displayPageUrl(handle.page.url()); } catch { /* 最后已知 URL 不可用。 */ }
+  return {
+    traceName: trace.name, startedAt: new Date(startedAt).toISOString(),
+    durationMs: Date.now() - startedAt, ok: false, steps: [], drifts: [], healRequired: false,
+    failure: trace.steps[0] ? {
+      failedIndex: 0, failedStep: trace.steps[0], kind: "timeout", retryBlocked: true,
+      message: "执行前准备未完成，尚未开始任何步骤；" + (error instanceof ExecutionDeadlineError || error instanceof PageInitializationDeadlineError ? "准备超时。" : "页面需要恢复。") + error.message,
+      snapshot: "（执行前准备未完成，无法获取可信快照）", currentUrl,
+      consoleErrors: [], failedRequests: []
+    } : undefined
+  };
+}
+
+/** 归档截图同样有界；截图超时保留主失败，阻止不安全的自动恢复。 */
+export async function captureFailureScreenshot(
+  handle: PageHandle, collector: DiagnosticsCollector, record: RunRecord
+): Promise<{ record: RunRecord; screenshot?: string }> {
+  if (record.ok || record.failure?.retryBlocked || record.failure?.kind === "page-closed") return { record };
+  try {
+    return { record, screenshot: await runWithDeadline(handle, 2000, () => collector.screenshot()) };
+  } catch (error) {
+    if ((error instanceof ExecutionDeadlineError || error instanceof ExecutionQuarantinedError || error instanceof PageClosedError) && record.failure) {
+      return { record: { ...record, healRequired: false, failure: {
+        ...record.failure, retryBlocked: true,
+        message: record.failure.message + "\n失败截图无法获取；" + error.message
+      } } };
+    }
+    return { record };
+  }
+}
+
 export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
+  validateStepTimeoutMs(opts.stepTimeoutMs);
   assertVariables(opts.trace.steps, opts.vars);
   const origins = inspectVariables(opts.trace.steps, opts.vars, opts.environmentNames).environmentUsed;
 
@@ -108,7 +169,7 @@ export async function replayTrace(opts: ReplayOptions): Promise<RunRecord> {
     vars: opts.vars,
     steps: withSlowMo,
     captureDescriptors: false, environmentNames: opts.environmentNames,
-    resolveRetryMs: opts.resolveRetryMs,
+    resolveRetryMs: opts.resolveRetryMs, stepTimeoutMs: opts.stepTimeoutMs,
     visual: opts.visual,
     observer: opts.observer ? remapObserver(opts.observer, realIndex, steps.length) : undefined
   });

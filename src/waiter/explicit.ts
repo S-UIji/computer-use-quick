@@ -1,3 +1,4 @@
+import { executionCheckpoint, executionSleep } from "../executor/deadline.js";
 import type { PageHandle } from "../session/browser.js";
 import { assertPageOpen } from "../session/pageErrors.js";
 import type { WaitCondition } from "../types.js";
@@ -70,6 +71,7 @@ export async function waitFor(
   };
 
   for (;;) {
+    executionCheckpoint();
     assertPageOpen(handle);
     const ready = await satisfied();
     assertPageOpen(handle);
@@ -84,6 +86,6 @@ export async function waitFor(
       }
       throw new Error(message);
     }
-    await new Promise((r) => setTimeout(r, 100));
+    await executionSleep(100);
   }
 }

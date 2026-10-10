@@ -11,11 +11,11 @@ import type { RunRecord, Step, FailureKind } from "./types.js";
 import { takeSnapshot } from "./perception/snapshot.js";
 import { diffLines, renderDiff } from "./perception/diff.js";
 import { DiagnosticsCollector } from "./diagnostics/collector.js";
-import { NetworkTracker } from "./waiter/stability.js";
+import { ExecutionDeadlineError, ExecutionQuarantinedError, validateStepTimeoutMs } from "./executor/deadline.js";
 import { runBatch } from "./executor/batch.js";
 import { resolveVariables, inspectVariables, MissingVariablesError, variableSourceNotice } from "./executor/variables.js";
 import { saveTrace, loadTraceSnapshot, canonicalTracePath } from "./trace/store.js";
-import { replayTrace } from "./trace/replay.js";
+import { replayTrace, prepareExecution, preparationFailureRecord, captureFailureScreenshot } from "./trace/replay.js";
 import {
   checkHealGate, runHeal, runMultiHeal, buildHealedTrace, renderDemoFailure, validationCountsAgainstBudget,
   HEALABLE_KINDS, MAX_HEALS_PER_TRACE, type HealBudget
@@ -26,11 +26,14 @@ import { archiveRun } from "./report/archive.js";
 import { renderSuiteResult } from "./report/suiteReport.js";
 import { renderRunRecord } from "./report/runRecord.js";
 import { interruptionRecovery } from "./report/interruptionRecovery.js";
-import { createVariableRedactor, redactVariableFailure, redactVariableSnapshot } from "./report/variablePrivacy.js";
-import { captureAuth, applyAuth, loadAuth, type AuthState } from "./session/auth.js";
+import { createVariableRedactor, redactVariableFailure, redactVariableSnapshot, redactVariableRecord } from "./report/variablePrivacy.js";
+import { captureAuth, loadAuth, type AuthState } from "./session/auth.js";
 import { RunWatch } from "./watch/runWatch.js";
 import { ProgressReporter } from "./watch/progress.js";
 import { SuiteProgress } from "./watch/suiteProgress.js";
+
+const stepTimeoutSchema = z.number().int().min(100).max(300000).optional()
+  .describe("单步骤整体执行预算（默认 30000ms，100~300000ms）；超时停止后续步骤，需要 snapshot 核实副作用。");
 
 /** 最近一次 snapshot 的 ref 表，按 pageId 保存，供 batch 用 ref 指代元素 */
 export const refTables = new Map<string, Map<string, number>>();
@@ -194,6 +197,7 @@ export function createServer(session: BrowserSession): McpServer {
       inputSchema: {
         pageId: z.string().optional(),
         steps: z.array(z.unknown()).min(1).describe("步骤数组，见 description"),
+        stepTimeoutMs: stepTimeoutSchema,
         vars: z.record(z.string()).optional()
           .describe("变量表，供 ${VAR} 插值；凭证从这里传，不要写进步骤字面量"),
         resolveRetryMs: z.number().int().min(0).optional()
@@ -210,8 +214,8 @@ export function createServer(session: BrowserSession): McpServer {
         )
       }
     },
-    async ({ pageId, steps, vars, stability, resolveRetryMs }, extra) => {
-      try { validateStepsInput(steps); }
+    async ({ pageId, steps, vars, stability, resolveRetryMs, stepTimeoutMs }, extra) => {
+      try { validateStepTimeoutMs(stepTimeoutMs); validateStepsInput(steps); }
       catch (error) {
         if (!(error instanceof StepValidationError)) throw error;
         return { isError: true, content: [{ type: "text" as const, text: error.message }] };
@@ -222,8 +226,14 @@ export function createServer(session: BrowserSession): McpServer {
       const handle = await session.getPage(pageId);
       const notice = variableSourceNotice(variableCheck.environmentUsed) +
         redact(pageChangeNotice(observedUrls.get(handle.pageId), handle.page.url()) + notices(session, handle));
-      const collector = await DiagnosticsCollector.attach(handle);
-      const tracker = await NetworkTracker.attach(handle);
+      let prepared: Awaited<ReturnType<typeof prepareExecution>>;
+      try { prepared = await prepareExecution(handle); }
+      catch (error) {
+        if (!(error instanceof ExecutionDeadlineError) && !(error instanceof ExecutionQuarantinedError)) throw error;
+        return { isError: true, content: [{ type: "text" as const,
+          text: notice + "执行前准备未完成，尚未开始任何步骤；准备超时或页面需要恢复。\n" + redact(error.message) }] };
+      }
+      const { collector, tracker } = prepared;
       const refs = refTables.get(handle.pageId) ?? new Map<string, number>();
 
       const watch = new RunWatch({
@@ -234,7 +244,7 @@ export function createServer(session: BrowserSession): McpServer {
         handle, tracker, collector, refs, refLabels: refLabelTables.get(handle.pageId),
         vars: variableState.values, environmentNames: variableState.environmentNames,
         steps: steps as unknown as Step[],
-        stability, resolveRetryMs,
+        stability, resolveRetryMs, stepTimeoutMs,
         observer: watch
       });
       redact = createVariableRedactor(variableState.values, variableCheck.environmentUsed, r.variableRedactions);
@@ -360,6 +370,7 @@ export function createServer(session: BrowserSession): McpServer {
         "和失败上下文。",
       inputSchema: {
         tracePath: z.string().describe("trace 文件路径"),
+        stepTimeoutMs: stepTimeoutSchema,
         vars: z.record(z.string()).optional().describe("变量表，凭证从这里传"),
         slowMoMs: z.number().int().min(0).optional()
           .describe("每步之间的延迟，演示场景用，默认 0"),
@@ -372,7 +383,9 @@ export function createServer(session: BrowserSession): McpServer {
           .describe("true 时重录全部视觉基线并一律通过（页面改版属预期时用），默认 false")
       }
     },
-    async ({ tracePath, vars, slowMoMs, resolveRetryMs, pageId, auth, updateBaselines }, extra) => {
+    async ({ tracePath, vars, slowMoMs, resolveRetryMs, stepTimeoutMs, pageId, auth, updateBaselines }, extra) => {
+      validateStepTimeoutMs(stepTimeoutMs);
+      const startedAt = Date.now();
       tracePath = await canonicalTracePath(tracePath);
       const { trace, fingerprint } = await loadTraceSnapshot(tracePath);
       const variableState = resolveVariables(vars);
@@ -381,39 +394,49 @@ export function createServer(session: BrowserSession): McpServer {
         return { isError: true, content: [{ type: "text" as const,
           text: notices(session) + new MissingVariablesError(variableCheck.missing).message }] };
       }
-      const handle = await session.getPage(pageId);
-      const notice = variableSourceNotice(variableCheck.environmentUsed) + notices(session, handle);
-      const collector = await DiagnosticsCollector.attach(handle);
-      const tracker = await NetworkTracker.attach(handle);
-      collector.clear();
-
       const { auth: authState, error: authError } = await resolveAuth(auth);
       if (authError) {
-        return { isError: true, content: [{ type: "text" as const, text: notice + authError }] };
+        return { isError: true, content: [{ type: "text" as const, text: notices(session) + authError }] };
       }
-      // 认证态注入抢在 replay 的 navigate 之前——localStorage 播种随新文档生效
-      if (authState) await applyAuth(handle, authState);
-
-      const watch = new RunWatch({
-        handle, label: trace.name, watch: session.watchEnabled,
-        progress: ProgressReporter.from(extra), progressPrefix: `${trace.name} · `
-      });
-      const rec = await replayTrace({
-        handle, tracker, collector, trace, slowMoMs, resolveRetryMs,
-        vars: variableState.values, environmentNames: variableState.environmentNames,
-        visual: { traceName: trace.name, updateBaselines },
-        observer: watch
-      });
-      // 全绿 = 新一轮修复周期开始，自愈预算清零；失败则记下，供 heal_step 消费
-      rememberRun(tracePath, fingerprint, rec);
-
-      // 归档：run-record 总是落盘；失败附现场包（截图 + 快照 + trace 副本）
+      let handle: PageHandle | undefined;
+      let collector: DiagnosticsCollector | undefined;
+      let watch: RunWatch | undefined;
+      let rec: RunRecord;
+      let notice = variableSourceNotice(variableCheck.environmentUsed);
+      try {
+        handle = await session.getPage(pageId);
+        notice += notices(session, handle);
+        const prepared = await prepareExecution(handle, authState);
+        collector = prepared.collector;
+        collector.clear();
+        watch = new RunWatch({
+          handle, label: trace.name, watch: session.watchEnabled,
+          progress: ProgressReporter.from(extra), progressPrefix: `${trace.name} · `
+        });
+        rec = await replayTrace({
+          handle, tracker: prepared.tracker, collector, trace, slowMoMs, resolveRetryMs, stepTimeoutMs,
+          vars: variableState.values, environmentNames: variableState.environmentNames,
+          visual: { traceName: trace.name, updateBaselines }, observer: watch
+        });
+      } catch (error) {
+        const failure = preparationFailureRecord(trace, error, startedAt, handle);
+        if (!failure) throw error;
+        rec = redactVariableRecord(failure, createVariableRedactor(variableState.values,
+          [...variableCheck.environmentUsed, ...Object.keys(vars ?? {})]));
+      }
+      // 截图收尾超时不覆盖主失败；其隔离状态必须先记入自愈证据。
       let screenshot: string | undefined;
-      if (!rec.ok && !rec.failure?.retryBlocked) screenshot = await collector.screenshot().catch(() => undefined);
+      if (collector && handle) {
+        const captured = await captureFailureScreenshot(handle, collector, rec);
+        rec = captured.record;
+        screenshot = captured.screenshot;
+      }
+      // 全绿 = 新一轮修复周期开始，自愈预算清零；失败则记下，供 heal_step 消费。
+      rememberRun(tracePath, fingerprint, rec);
       await archiveRun({ traceName: trace.name, record: rec, trace, screenshotBase64: screenshot });
 
       return { content: [{ type: "text" as const,
-        text: notice + renderRunRecord(rec) + (watch.setupWarning ? `\n\n⚠ ${watch.setupWarning}` : "") }] };
+        text: notice + renderRunRecord(rec) + (watch?.setupWarning ? `\n\n⚠ ${watch.setupWarning}` : "") }] };
     }
   );
 
@@ -428,6 +451,7 @@ export function createServer(session: BrowserSession): McpServer {
         "concurrency 默认 3、硬上限 8；串行等价于 concurrency=1。",
       inputSchema: {
         tracePaths: z.array(z.string()).min(1).describe("trace 文件路径数组，≥1 条"),
+        stepTimeoutMs: stepTimeoutSchema,
         concurrency: z.number().int().min(1).optional()
           .describe("并发数，默认 3，硬上限 8；1 即串行"),
         vars: z.record(z.string()).optional().describe("变量表，全部用例共享；凭证从这里传"),
@@ -440,7 +464,8 @@ export function createServer(session: BrowserSession): McpServer {
           .describe("true 时重录全部视觉基线并一律通过，默认 false")
       }
     },
-    async ({ tracePaths, concurrency, vars, slowMoMs, resolveRetryMs, auth, updateBaselines }, extra) => {
+    async ({ tracePaths, concurrency, vars, slowMoMs, resolveRetryMs, stepTimeoutMs, auth, updateBaselines }, extra) => {
+      validateStepTimeoutMs(stepTimeoutMs);
       // 上限校验前置：不建任何浏览器资源就拒绝
       const gate = checkConcurrency(concurrency);
       if (!gate.ok) {
@@ -458,7 +483,7 @@ export function createServer(session: BrowserSession): McpServer {
         const result = await runSuite({
           session, paths: await Promise.all(tracePaths.map(canonicalTracePath)),
           vars: variableState.values, environmentNames: variableState.environmentNames,
-          concurrency: gate.value, slowMoMs, resolveRetryMs, auth: authState, updateBaselines,
+          concurrency: gate.value, slowMoMs, resolveRetryMs, stepTimeoutMs, auth: authState, updateBaselines,
           observerFor: (handle, name) => new RunWatch({ handle, label: name, watch: session.watchEnabled }),
           onTraceEvent: progress.enabled ? event => suiteProgress.accept(event) : undefined
         });
@@ -487,6 +512,7 @@ export function createServer(session: BrowserSession): McpServer {
         "已通过修复不为后续原步骤失败扣次数。页面关闭、用户打断和演示失败不计。",
       inputSchema: {
         tracePath: z.string().describe("trace 文件路径，与 replay 相同"),
+        stepTimeoutMs: stepTimeoutSchema,
         actions: z.array(z.unknown()).min(1).max(3).optional()
           .describe("单点演示的 1~3 步，target 可用 snapshot 返回的 ref"),
         step: z.unknown().optional().describe("单点手写完整步骤，目标用稳定 descriptor"),
@@ -503,7 +529,8 @@ export function createServer(session: BrowserSession): McpServer {
         vars: z.record(z.string()).optional().describe("变量表，供 ${VAR} 插值；凭证从这里传")
       }
     },
-    async ({ tracePath, actions, step, stepIndex, repairs, dryRun = false, pageId, auth, vars }, extra) => {
+    async ({ tracePath, actions, step, stepIndex, repairs, dryRun = false, stepTimeoutMs, pageId, auth, vars }, extra) => {
+      validateStepTimeoutMs(stepTimeoutMs);
       const fail = (text: string) => ({ isError: true, content: [{ type: "text" as const, text }] });
       tracePath = await canonicalTracePath(tracePath);
       if (healingTraces.has(tracePath)) return fail("该 trace 正在自愈，请等待当前调用结束后重试（未计自愈次数）。");
@@ -573,7 +600,7 @@ export function createServer(session: BrowserSession): McpServer {
         const common = {
           session, tracePath, trace, expectedFingerprint: fingerprint,
           vars: variableState.values, environmentNames: variableState.environmentNames,
-          dryRun, auth: authState,
+          dryRun, stepTimeoutMs, auth: authState,
           validationObserverFor: (vHandle: PageHandle) => new RunWatch({
             handle: vHandle, label: "自愈验证", watch: session.watchEnabled,
             progress, progressPrefix: "验证门 · 全量重放 ", progressOffset: demoCount, progressTotal: healTotal
@@ -587,8 +614,15 @@ export function createServer(session: BrowserSession): McpServer {
         } else {
           const handle = await session.getPage(pageId);
           notice = sourceNotice + notices(session, handle);
-          const collector = await DiagnosticsCollector.attach(handle);
-          const tracker = await NetworkTracker.attach(handle);
+          let prepared: Awaited<ReturnType<typeof prepareExecution>>;
+          try { prepared = await prepareExecution(handle); }
+          catch (error) {
+            if (!(error instanceof ExecutionDeadlineError) && !(error instanceof ExecutionQuarantinedError)) throw error;
+            if (evidence && healEvidence.get(tracePath) === evidence) evidence.retryBlocked = true;
+            const redact = createVariableRedactor(variableState.values, checks.flatMap(check => check.environmentUsed));
+            return fail(notice + "自愈演示的执行前准备未完成；准备超时或页面需要恢复。trace 未写回、未计自愈次数。\n" + redact(error.message));
+          }
+          const { collector, tracker } = prepared;
           const refs = refTables.get(handle.pageId) ?? new Map<string, number>();
           const refLabels = refLabelTables.get(handle.pageId) ?? new Map<string, string>();
           outcome = await runHeal({

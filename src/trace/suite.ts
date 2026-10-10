@@ -2,15 +2,13 @@ import { basename } from "node:path";
 import type { WindowSlot } from "../session/windowLayout.js";
 import type { BrowserSession, PageHandle } from "../session/browser.js";
 import type { StepObserver } from "../executor/observer.js";
-import { NetworkTracker } from "../waiter/stability.js";
-import { DiagnosticsCollector } from "../diagnostics/collector.js";
 import type { RunRecord, Trace } from "../types.js";
-import { PageClosedError } from "../session/pageErrors.js";
 import { loadTraceSnapshot } from "./store.js";
-import { replayTrace, pageClosedRecord } from "./replay.js";
+import { replayTrace, preparationFailureRecord, prepareExecution, captureFailureScreenshot } from "./replay.js";
 import { archiveRun } from "../report/archive.js";
 import type { AuthState } from "../session/auth.js";
-import { applyAuth } from "../session/auth.js";
+import { validateStepTimeoutMs, executionCheckpoint } from "../executor/deadline.js";
+import { createVariableRedactor, redactVariableRecord } from "../report/variablePrivacy.js";
 import { inspectVariables, MissingVariablesError } from "../executor/variables.js";
 
 type PreparedTrace = PromiseSettledResult<Awaited<ReturnType<typeof loadTraceSnapshot>>>;
@@ -90,6 +88,7 @@ export interface RunSuiteOptions {
   environmentNames?: ReadonlySet<string>;
   slowMoMs?: number;
   resolveRetryMs?: number;
+  stepTimeoutMs?: number;
   /** 归档根目录（默认 ./traces/runs；测试指向临时目录） */
   runsDir?: string;
   /** 认证态（session 默认或调用方显式指定）；注入到每个运行 Context */
@@ -118,6 +117,7 @@ function traceObserver(opts: RunSuiteOptions, info: TraceProgressInfo, observer?
     onStepStart: async (index, step, description) => { await observer?.onStepStart(index, step, description); },
     onStepEnd: async result => {
       await observer?.onStepEnd(result);
+      executionCheckpoint();
       emitTraceEvent(opts, { ...info, kind: "step", completedSteps: result.index + (result.ok ? 1 : 0) });
     },
     onRunEnd: async outcome => { await observer?.onRunEnd(outcome); },
@@ -148,12 +148,10 @@ async function attemptOnce(
     emitTraceEvent(opts, { ...info, kind: "started" });
     resource = await opts.session.newIsolatedPage(slot);
     const { handle } = resource;
-    const tracker = await NetworkTracker.attach(handle);
-    const collector = await DiagnosticsCollector.attach(handle);
-    if (opts.auth) await applyAuth(handle, opts.auth);
-    const rec = await replayTrace({
+    const { tracker, collector } = await prepareExecution(handle, opts.auth);
+    let rec = await replayTrace({
       handle, tracker, collector, trace, vars: opts.vars, environmentNames: opts.environmentNames,
-      slowMoMs: opts.slowMoMs, resolveRetryMs: opts.resolveRetryMs,
+      slowMoMs: opts.slowMoMs, resolveRetryMs: opts.resolveRetryMs, stepTimeoutMs: opts.stepTimeoutMs,
       visual: {
         traceName: trace.name,
         updateBaselines: opts.updateBaselines,
@@ -163,10 +161,9 @@ async function attemptOnce(
     });
 
     // 失败现场包：截图必须在 Context release 前抓
-    let screenshot: string | undefined;
-    if (!rec.ok && !rec.failure?.retryBlocked) {
-      screenshot = await collector.screenshot().catch(() => undefined);
-    }
+    const captured = await captureFailureScreenshot(handle, collector, rec);
+    rec = captured.record;
+    const screenshot = captured.screenshot;
     await archiveRun({
       traceName: trace.name, record: rec, trace,
       screenshotBase64: screenshot, rootDir: opts.runsDir, suffix,
@@ -181,13 +178,16 @@ async function attemptOnce(
       attempts: suffix ? 2 : 1
     };
   } catch (err) {
-    if (trace && (err instanceof PageClosedError || resource?.handle.page.isClosed())) {
-      const message = err instanceof PageClosedError ? err.message : new PageClosedError(resource!.handle.pageId).message;
-      const record = pageClosedRecord(trace, message, t0);
+    const preparationFailure = trace && preparationFailureRecord(trace, err, t0, resource?.handle);
+    if (trace && preparationFailure) {
+      const origins = inspectVariables(trace.steps, opts.vars, opts.environmentNames).environmentUsed;
+      const record = redactVariableRecord(preparationFailure, createVariableRedactor(opts.vars, [
+      ...origins, ...Object.keys(opts.vars).filter(name => !opts.environmentNames?.has(name))
+    ]));
       await archiveRun({ traceName: trace.name, record, trace, rootDir: opts.runsDir, suffix });
       return {
         path, name: trace.name, ok: false, durationMs: Date.now() - t0,
-        stepCount: 0, driftCount: 0, record, traceFingerprint, pageClosed: true, attempts: suffix ? 2 : 1
+        stepCount: 0, driftCount: 0, record, traceFingerprint, pageClosed: record.failure?.kind === "page-closed" ? true : undefined, attempts: suffix ? 2 : 1
       };
     }
     // 未预期异常兜底为单条失败：trace 读不出/Context 创建失败等，
@@ -233,6 +233,7 @@ async function runOne(opts: RunSuiteOptions, path: string, prepared: PreparedTra
  * 跑完全部再汇总。concurrency=1 时自然退化为串行。
  */
 export async function runSuite(opts: RunSuiteOptions): Promise<SuiteResult> {
+  validateStepTimeoutMs(opts.stepTimeoutMs);
   if (opts.paths.length === 0) throw new Error("tracePaths 不能为空");
 
   const t0 = Date.now();

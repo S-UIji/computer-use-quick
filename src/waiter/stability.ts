@@ -1,3 +1,4 @@
+import { executionCheckpoint, executionRace, executionSleep } from "../executor/deadline.js";
 import type { PageHandle } from "../session/browser.js";
 
 export interface StabilityOptions {
@@ -9,6 +10,7 @@ export interface StabilityOptions {
 export class NetworkTracker {
   /** 每个页面只挂一次监听，否则同一请求会被重复计数 */
   private static instances = new WeakMap<PageHandle, NetworkTracker>();
+  private static initializing = new WeakMap<PageHandle, Promise<NetworkTracker>>();
 
   /**
    * 只有这些类型的请求才算「在途信号」。埋点/信标/图片类请求（Ping/Image/Beacon 等）
@@ -38,35 +40,46 @@ export class NetworkTracker {
     const existing = NetworkTracker.instances.get(handle);
     if (existing) return existing;
 
+    const initializing = NetworkTracker.initializing.get(handle);
+    if (initializing) return executionRace(initializing);
     const t = new NetworkTracker();
-    NetworkTracker.instances.set(handle, t);
-
-    await handle.cdp.send("Network.enable");
-    await handle.cdp.send("Page.enable").catch(() => {});
-    handle.cdp.on("Network.requestWillBeSent", (e: {
-      requestId: string; type?: string; request?: { url?: string };
-    }) => {
-      // type 缺失时保守计入（老版本 CDP 或特殊请求），有类型时只认白名单
-      if (e.type !== undefined && !NetworkTracker.COUNTED_TYPES.has(e.type)) return;
-      t.pending.set(e.requestId, { url: e.request?.url ?? "", at: Date.now() });
-      t.changedAt = Date.now();
-    });
-    const done = (e: { requestId: string }): void => {
-      const entry = t.pending.get(e.requestId);
-      // 未计入白名单的请求（信标/图片等）从头到尾不触碰静默计时
-      if (!entry) return;
-      t.pending.delete(e.requestId);
-      t.changedAt = Date.now();
-      t.completed.push({ url: entry.url, at: Date.now() });
-      if (t.completed.length > NetworkTracker.COMPLETED_CAP) t.completed.shift();
+    const work = (async (): Promise<NetworkTracker> => {
+      await handle.cdp.send("Network.enable");
+      executionCheckpoint();
+      await handle.cdp.send("Page.enable").catch(() => {});
+      executionCheckpoint();
+      handle.cdp.on("Network.requestWillBeSent", (e: {
+        requestId: string; type?: string; request?: { url?: string };
+      }) => {
+        // type 缺失时保守计入（老版本 CDP 或特殊请求），有类型时只认白名单
+        if (e.type !== undefined && !NetworkTracker.COUNTED_TYPES.has(e.type)) return;
+        t.pending.set(e.requestId, { url: e.request?.url ?? "", at: Date.now() });
+        t.changedAt = Date.now();
+      });
+      const done = (e: { requestId: string }): void => {
+        const entry = t.pending.get(e.requestId);
+        // 未计入白名单的请求（信标/图片等）从头到尾不触碰静默计时
+        if (!entry) return;
+        t.pending.delete(e.requestId);
+        t.changedAt = Date.now();
+        t.completed.push({ url: entry.url, at: Date.now() });
+        if (t.completed.length > NetworkTracker.COMPLETED_CAP) t.completed.shift();
+      };
+      handle.cdp.on("Network.loadingFinished", done);
+      handle.cdp.on("Network.loadingFailed", done);
+      // 主 frame 导航 = 上一文档的在途请求全部作废，是僵尸条目最及时的清场时机
+      handle.cdp.on("Page.frameNavigated", (e: { frame: { parentId?: string } }) => {
+        if (!e.frame.parentId && t.pending.size > 0) t.pending.clear();
+      });
+      NetworkTracker.instances.set(handle, t);
+      return t;
+    })();
+    NetworkTracker.initializing.set(handle, work);
+    const settled = (): void => {
+      if (NetworkTracker.initializing.get(handle) === work) NetworkTracker.initializing.delete(handle);
     };
-    handle.cdp.on("Network.loadingFinished", done);
-    handle.cdp.on("Network.loadingFailed", done);
-    // 主 frame 导航 = 上一文档的在途请求全部作废，是僵尸条目最及时的清场时机
-    handle.cdp.on("Page.frameNavigated", (e: { frame: { parentId?: string } }) => {
-      if (!e.frame.parentId && t.pending.size > 0) t.pending.clear();
-    });
-    return t;
+    void work.then(settled, settled);
+    return executionRace(work);
   }
 
   inFlight(): number {
@@ -124,6 +137,7 @@ export async function waitStable(
   const deadline = Date.now() + timeout;
 
   for (;;) {
+    executionCheckpoint();
     const now = Date.now();
     if (now >= deadline) return true;
 
@@ -131,6 +145,6 @@ export async function waitStable(
     const netOk = tracker.inFlight() === 0 && now - tracker.lastChangeAt() >= netQuiet;
     if (domOk && netOk) return false;
 
-    await new Promise((r) => setTimeout(r, 50));
+    await executionSleep(50);
   }
 }

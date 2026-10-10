@@ -18,9 +18,12 @@ import { isPlaintextSecret } from "../trace/store.js";
 import { BackgroundScreenshotError } from "../watch/overlay.js";
 import { DialogGuard, describeDialog } from "../session/dialogs.js";
 import { validateStepsInput } from "./stepValidation.js";
+import { ExecutionDeadlineError, ExecutionQuarantinedError, FinalizationBudget, assertExecutionReady, executionCheckpoint, runWithDeadline, validateStepTimeoutMs } from "./deadline.js";
 
 export interface BatchOptions {
   handle: PageHandle;
+  /** 每步整体硬超时，包含观察、解析、输入队列、动作、等待及恢复。默认 30000ms。 */
+  stepTimeoutMs?: number;
   tracker: NetworkTracker;
   collector: DiagnosticsCollector;
   refs: Map<string, number>;
@@ -103,14 +106,20 @@ async function failureAt(
   step: Step,
   kind: FailureKind,
   message: string,
-  candidates?: string[]
+  candidates?: string[],
+  finalizer?: FinalizationBudget
 ): Promise<FailureContext> {
   let currentUrl: string | undefined;
   try { currentUrl = displayPageUrl(opts.handle.page.url()); } catch { /* URL 诊断失败不掩盖原错误 */ }
   let snapshotText = "（快照获取失败）";
+  let diagnosticRisk = false;
   try {
-    snapshotText = (await takeSnapshot(opts.handle)).text;
-  } catch { /* 快照失败不该掩盖原始错误 */ }
+    snapshotText = (await (finalizer ? finalizer.run(() => takeSnapshot(opts.handle)) : takeSnapshot(opts.handle))).text;
+  } catch (error) {
+    // Preserve the original failure, but uncertainty during diagnostics must still block retry/heal.
+    diagnosticRisk = error instanceof ExecutionDeadlineError || error instanceof ExecutionQuarantinedError;
+  }
+  if (opts.handle.page.isClosed()) { kind = "page-closed"; message = new PageClosedError(opts.handle.pageId).message; }
   return {
     failedIndex: index,
     failedStep: step,
@@ -120,25 +129,29 @@ async function failureAt(
     currentUrl,
     candidates: candidates?.slice(0, 10),
     consoleErrors: opts.collector.consoleErrors(),
-    failedRequests: opts.collector.failedRequests()
+    failedRequests: opts.collector.failedRequests(),
+    ...(diagnosticRisk && kind !== "page-closed" ? { retryBlocked: true } : {})
   };
 }
 
 export async function runBatch(opts: BatchOptions): Promise<BatchResult> {
   validateStepsInput(opts.steps, true);
+  validateStepTimeoutMs(opts.stepTimeoutMs);
+  const finalizer = new FinalizationBudget(opts.handle);
   // 执行期间弹出的 JS 弹窗立即按策略处理，否则页面上的一切 CDP 调用都会挂住
   const dialogs = DialogGuard.for(opts.handle);
   dialogs?.arm();
   try {
-    return await runSteps(opts, dialogs);
+    return await runSteps(opts, dialogs, finalizer);
   } finally {
+    finalizer.dispose();
     dialogs?.disarm();
   }
 }
 
-async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): Promise<BatchResult> {
+async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined, finalizer: FinalizationBudget): Promise<BatchResult> {
   const obs = opts.observer;
-  const ctx: ActionContext = {
+  const baseContext: ActionContext = {
     handle: opts.handle,
     tracker: opts.tracker,
     refs: opts.refs,
@@ -155,16 +168,30 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
   const variableRedactions: VariableTextMapping[] = [];
   const activeEnvironment = new Set(opts.environmentNames);
   const descriptionOrigins = inspectVariables(opts.steps, opts.vars, opts.environmentNames).environmentUsed;
-  const fail = (failure: FailureContext): BatchResult => ({
-    ok: false, results, vars: ctx.vars, snapshot: failure.snapshot,
-    capturedSteps, artifacts: ctx.artifacts ?? [], failure,
+  let committedVars = baseContext.vars;
+  let committedArtifacts = baseContext.artifacts ?? [];
+  let finalizationRisk = false;
+  const finalizeObserver = async (task: () => Promise<void> | undefined): Promise<void> => {
+    try { await finalizer.runObserver(async () => { await task(); }); } catch (error) {
+      finalizationRisk ||= error instanceof ExecutionDeadlineError || error instanceof ExecutionQuarantinedError;
+    }
+  };
+  const fail = (failure: FailureContext): BatchResult => {
+    if (finalizationRisk && failure.kind !== "page-closed") failure.retryBlocked = true;
+    return ({
+    ok: false, results, vars: committedVars, snapshot: failure.snapshot,
+    capturedSteps, artifacts: committedArtifacts, failure,
     ...(variableRedactions.length ? { variableRedactions } : {})
-  });
+    });
+  };
 
-  await obs?.onRunStart(opts.steps.length);
+  if (!opts.steps.length) await finalizeObserver(() => obs?.onRunStart(0));
 
   for (let i = 0; i < opts.steps.length; i++) {
     const raw = opts.steps[i];
+    const ctx: ActionContext = { ...baseContext, vars: Object.assign(Object.create(null), committedVars), artifacts: [...committedArtifacts] };
+    let capturedToCommit: Step | undefined;
+    let endStarted = false;
     let description = describeAction(raw.action);
     const t0 = Date.now();
     const notes: string[] = [];
@@ -175,125 +202,141 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
     ctx.lastWaitTimedOut = undefined;
 
     try {
-      assertPageOpen(opts.handle);
-      const step = interpolateStep(raw, ctx.vars);
-      variableRedactions.push(...variableFieldMappings(raw, step, activeEnvironment));
-      description = describeStep(raw, opts.refLabels, createVariableRedactor(opts.vars, descriptionOrigins, variableRedactions));
-      await obs?.onStepStart(i, raw, description);
-      dialogs?.setStep(step);
-      // ref 是单次快照内的短期句柄，不能进 trace，要固化成长期 descriptor。
-      // 固化的时机必须早于动作本身：动作一旦触发导航或打开新标签，原元素就失效了，
-      // 事后再固化必然失败——早先的版本因此把"点击成功且页面已跳转"误判为步骤失败。
-      const target = (step as { target?: { ref?: string } }).target;
-      const refName = target && typeof target === "object" && "ref" in target
-        ? (target as { ref: string }).ref
-        : undefined;
+      const completedInterruption = await runWithDeadline(opts.handle, validateStepTimeoutMs(opts.stepTimeoutMs), async () => {
+        assertExecutionReady(opts.handle);
+        if (i === 0) { await obs?.onRunStart(opts.steps.length); executionCheckpoint(); }
+        assertPageOpen(opts.handle);
+        const step = interpolateStep(raw, ctx.vars);
+        variableRedactions.push(...variableFieldMappings(raw, step, activeEnvironment));
+        description = describeStep(raw, opts.refLabels, createVariableRedactor(opts.vars, descriptionOrigins, variableRedactions));
+        await obs?.onStepStart(i, raw, description);
+        executionCheckpoint();
+        dialogs?.setStep(step);
+        // ref 是单次快照内的短期句柄，不能进 trace，要固化成长期 descriptor。
+        // 固化的时机必须早于动作本身：动作一旦触发导航或打开新标签，原元素就失效了，
+        // 事后再固化必然失败——早先的版本因此把"点击成功且页面已跳转"误判为步骤失败。
+        const target = (step as { target?: { ref?: string } }).target;
+        const refName = target && typeof target === "object" && "ref" in target
+          ? (target as { ref: string }).ref
+          : undefined;
 
-      // 固化基于插值前的原始步骤：${VAR} 占位符必须原样进 trace，真实值只在执行时替换
-      let captured: Step = raw;
-      let passwordField = false;
-      const capturing = opts.captureDescriptors !== false;
-      if (capturing && (refName !== undefined || raw.action === "fill")) {
-        ctx.onResolved = async (backendNodeId: number) => {
-          if (raw.action === "fill") passwordField = await isPasswordInput(opts.handle, backendNodeId);
-          if (refName === undefined) return;
-          try {
-            const descriptor = await buildDescriptor(opts.handle, backendNodeId);
-            captured = { ...raw, target: { descriptor } } as Step;
-          } catch (err) {
-            // 固化失败只降级成警告：跑得通比能回放重要，
-            // 不能因为拿不到 descriptor 就把一个已经成功的动作判成失败。
-            notes.push(
-              `ref「${refName}」固化成 descriptor 失败（${err instanceof Error ? err.message : String(err)}）：` +
-              `这一步不会进 trace，如需回放请重新探索这一步`
-            );
+        // 固化基于插值前的原始步骤：${VAR} 占位符必须原样进 trace，真实值只在执行时替换
+        let captured: Step = raw;
+        let passwordField = false;
+        const capturing = opts.captureDescriptors !== false;
+        if (capturing && (refName !== undefined || raw.action === "fill")) {
+          ctx.onResolved = async (backendNodeId: number) => {
+            if (raw.action === "fill") passwordField = await isPasswordInput(opts.handle, backendNodeId);
+            if (refName === undefined) return;
+            try {
+              const descriptor = await buildDescriptor(opts.handle, backendNodeId);
+              captured = { ...raw, target: { descriptor } } as Step;
+            } catch (err) {
+              // 固化失败只降级成警告：跑得通比能回放重要，
+              // 不能因为拿不到 descriptor 就把一个已经成功的动作判成失败。
+              notes.push(
+                `ref「${refName}」固化成 descriptor 失败（${err instanceof Error ? err.message : String(err)}）：` +
+                `这一步不会进 trace，如需回放请重新探索这一步`
+              );
+            }
+          };
+        }
+
+        executionCheckpoint();
+        if (step.action === "assert") {
+          const note = await runAssert(ctx, step);
+          if (note) notes.push(note);
+        } else {
+          await runAction(ctx, step);
+        }
+        executionCheckpoint();
+        notes.push(...inputWarnings);
+        assertPageOpen(opts.handle);
+        ctx.onResolved = undefined;
+        if (step.action === "extract") activeEnvironment.delete(step.as);
+        if (ctx.lastWaitTimedOut) {
+          // 打满上限不抛错是设计（等不到静默不耽误干活），但这笔开销必须显形——
+          // 否则持续流量页面上每一步都在静默地白付整个 timeout
+          notes.push(
+            `隐式等待打满 ${ctx.stability?.timeoutMs ?? 5000}ms 上限：页面有持续的接口请求或 DOM 变更，` +
+            `可考虑调小 stability.timeoutMs 或为该步改用显式 wait`
+          );
+          ctx.lastWaitTimedOut = undefined;
+        }
+        const handledDialogs = dialogs?.takeHandled() ?? [];
+        if (capturing && refName !== undefined && captured === raw) {
+          // 带 ref 的步骤没固化成功（固化抛错，或像 assert hidden 一样目标已不存在、
+          // 根本没机会固化）。它进 trace 会让 save_trace 整体拒绝且本 session 无法恢复，
+          // 所以按告警所说跳过它——跑得通比能回放重要。
+          if (!notes.length) {
+            notes.push(`ref「${refName}」未固化成 descriptor：这一步不会进 trace`);
           }
+        } else {
+          if (passwordField) captured = { ...captured, sensitive: true } as Step;
+          // 按默认策略处理过弹窗的步骤记下处理方式，回放据此复现，不随默认策略变化
+          if (capturing && handledDialogs.some((d) => d.source === "default")) {
+            captured = { ...captured, dialog: "accept" } as Step;
+          }
+          // 当场告警，别等探索完整条流程、到 save_trace 才被拒
+          if (capturing && isPlaintextSecret(captured)) {
+            notes.push("向凭证字段写入了明文值，保存 trace 时会被拒绝：请改用 ${VAR} 占位符，真实值通过 vars 传入");
+          }
+          capturedToCommit = captured;
+        }
+        // 放在固化判断之后：上面「未固化」告警靠 notes 是否为空判断有没有别的说明
+        for (const d of handledDialogs) notes.push(describeDialog(d));
+
+        // 介入检测在步骤边界结算：本步期间的用户操作归到本步
+        const interruption = obs?.takeInterruption();
+        const scrolls = obs?.takeScrollCount() ?? 0;
+        const isLast = i === opts.steps.length - 1;
+        if (scrolls > 0) notes.push(`执行期间检测到用户滚动 ${scrolls} 次（未中止）`);
+        if (interruption && isLast) {
+          // 所有步骤与断言都已通过，不因事后操作改判，只显形
+          notes.push(`执行期间检测到用户操作（${describeInterruption(interruption)}），所有步骤已完成，结果仍有效`);
+        } else if (interruption && opts.captureDescriptors !== false) {
+          notes.push("执行期间有用户操作，save_trace 前请确认这一步");
+        }
+
+        const result: StepResult = {
+          index: i,
+          action: raw.action,
+          description,
+          ok: true,
+          durationMs: Date.now() - t0,
+          strategyIndex: ctx.lastResolve?.strategyIndex,
+          error: [
+            // sleep 成功也要显形：每出现一次都是一处该改成显式 wait 的技术债
+            raw.action === "sleep" ? "使用了固定 sleep，建议改为显式 wait 条件" : "",
+            ...notes
+          ].filter(Boolean).join("；") || undefined
         };
-      }
+        ctx.lastResolve = undefined;
+        endStarted = true;
+        await obs?.onStepEnd(Object.freeze({ ...result }));
+        executionCheckpoint();
+        result.durationMs = Date.now() - t0;
+        results.push(result);
+        if (capturedToCommit) capturedSteps.push(capturedToCommit);
+        committedVars = ctx.vars;
+        committedArtifacts = ctx.artifacts ?? [];
 
-      if (step.action === "assert") {
-        const note = await runAssert(ctx, step);
-        if (note) notes.push(note);
-      } else {
-        await runAction(ctx, step);
-      }
-      notes.push(...inputWarnings);
-      assertPageOpen(opts.handle);
-      ctx.onResolved = undefined;
-      if (step.action === "extract") activeEnvironment.delete(step.as);
-      if (ctx.lastWaitTimedOut) {
-        // 打满上限不抛错是设计（等不到静默不耽误干活），但这笔开销必须显形——
-        // 否则持续流量页面上每一步都在静默地白付整个 timeout
-        notes.push(
-          `隐式等待打满 ${ctx.stability?.timeoutMs ?? 5000}ms 上限：页面有持续的接口请求或 DOM 变更，` +
-          `可考虑调小 stability.timeoutMs 或为该步改用显式 wait`
-        );
-        ctx.lastWaitTimedOut = undefined;
-      }
-      const handledDialogs = dialogs?.takeHandled() ?? [];
-      if (capturing && refName !== undefined && captured === raw) {
-        // 带 ref 的步骤没固化成功（固化抛错，或像 assert hidden 一样目标已不存在、
-        // 根本没机会固化）。它进 trace 会让 save_trace 整体拒绝且本 session 无法恢复，
-        // 所以按告警所说跳过它——跑得通比能回放重要。
-        if (!notes.length) {
-          notes.push(`ref「${refName}」未固化成 descriptor：这一步不会进 trace`);
-        }
-      } else {
-        if (passwordField) captured = { ...captured, sensitive: true } as Step;
-        // 按默认策略处理过弹窗的步骤记下处理方式，回放据此复现，不随默认策略变化
-        if (capturing && handledDialogs.some((d) => d.source === "default")) {
-          captured = { ...captured, dialog: "accept" } as Step;
-        }
-        // 当场告警，别等探索完整条流程、到 save_trace 才被拒
-        if (capturing && isPlaintextSecret(captured)) {
-          notes.push("向凭证字段写入了明文值，保存 trace 时会被拒绝：请改用 ${VAR} 占位符，真实值通过 vars 传入");
-        }
-        capturedSteps.push(captured);
-      }
-      // 放在固化判断之后：上面「未固化」告警靠 notes 是否为空判断有没有别的说明
-      for (const d of handledDialogs) notes.push(describeDialog(d));
-
-      // 介入检测在步骤边界结算：本步期间的用户操作归到本步
-      const interruption = obs?.takeInterruption();
-      const scrolls = obs?.takeScrollCount() ?? 0;
-      const isLast = i === opts.steps.length - 1;
-      if (scrolls > 0) notes.push(`执行期间检测到用户滚动 ${scrolls} 次（未中止）`);
-      if (interruption && isLast) {
-        // 所有步骤与断言都已通过，不因事后操作改判，只显形
-        notes.push(`执行期间检测到用户操作（${describeInterruption(interruption)}），所有步骤已完成，结果仍有效`);
-      } else if (interruption && opts.captureDescriptors !== false) {
-        notes.push("执行期间有用户操作，save_trace 前请确认这一步");
-      }
-
-      const result: StepResult = {
-        index: i,
-        action: raw.action,
-        description,
-        ok: true,
-        durationMs: Date.now() - t0,
-        strategyIndex: ctx.lastResolve?.strategyIndex,
-        error: [
-          // sleep 成功也要显形：每出现一次都是一处该改成显式 wait 的技术债
-          raw.action === "sleep" ? "使用了固定 sleep，建议改为显式 wait 条件" : "",
-          ...notes
-        ].filter(Boolean).join("；") || undefined
-      };
-      results.push(result);
-      ctx.lastResolve = undefined;
-      await obs?.onStepEnd(result);
-
-      if (interruption && !isLast) {
+        return interruption && !isLast ? interruption : undefined;
+      }, finalizer);
+      if (completedInterruption) {
         // 说明里不写步号：回放开 slowMo 时批次序号与 trace 真实序号不同，步号由渲染层按 failedIndex 显示
         const failure = await failureAt(
           opts, i + 1, opts.steps[i + 1], "user-interrupted",
-          `检测到用户操作（${describeInterruption(interruption)}），已在上一步完成后停止，本步未执行`
+          `检测到用户操作（${describeInterruption(completedInterruption)}），已在上一步完成后停止，本步未执行`, undefined, finalizer
         );
-        await obs?.onRunEnd({ ok: false, failedIndex: i + 1, interrupted: true });
+        await finalizeObserver(() => obs?.onRunEnd({ ok: false, failedIndex: i + 1, interrupted: true }));
         return fail(failure);
       }
     } catch (err) {
-      if (err instanceof BackgroundScreenshotError) retryBlocked = true;
+      if (err instanceof BackgroundScreenshotError || err instanceof ExecutionDeadlineError || err instanceof ExecutionQuarantinedError) retryBlocked = true;
       ctx.onResolved = undefined;
+      // Visual mismatch artifacts are completed failure evidence; expired work must never publish its staging buffer.
+      if (err instanceof AssertionFailure) committedArtifacts = [...(ctx.artifacts ?? [])];
       const c = classify(err, opts.handle);
       const detected = obs?.takeInterruption();
       const interruption = c.kind === "page-closed" ? undefined : detected;
@@ -310,10 +353,10 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
         description, ok: false, durationMs: Date.now() - t0, error: message
       };
       results.push(result);
-      await obs?.onStepEnd(result);
-      const failure = await failureAt(opts, i, raw, kind, message, c.candidates);
-      if (retryBlocked && kind !== "page-closed") failure.retryBlocked = true;
-      await obs?.onRunEnd({ ok: false, failedIndex: i, interrupted: interruption !== undefined });
+      if (!endStarted) await finalizeObserver(() => obs?.onStepEnd(Object.freeze({ ...result })));
+      const failure = await failureAt(opts, i, raw, kind, message, c.candidates, finalizer);
+      if (retryBlocked && failure.kind !== "page-closed") failure.retryBlocked = true;
+      await finalizeObserver(() => obs?.onRunEnd({ ok: false, failedIndex: i, interrupted: interruption !== undefined }));
       return fail(failure);
     }
   }
@@ -321,19 +364,20 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
   let final: Awaited<ReturnType<typeof takeSnapshot>>;
   try {
     assertPageOpen(opts.handle);
-    final = await takeSnapshot(opts.handle);
+    final = await finalizer.run(() => takeSnapshot(opts.handle));
     assertPageOpen(opts.handle);
   } catch (err) {
     const c = classify(err, opts.handle);
-    if (c.kind !== "page-closed" || opts.steps.length === 0) throw err;
+    if (opts.steps.length === 0) throw err;
     const index = opts.steps.length - 1;
     const last = results[results.length - 1];
     if (last) {
       last.ok = false;
       last.error = c.message;
     }
-    const failure = await failureAt(opts, index, opts.steps[index], c.kind, c.message);
-    await obs?.onRunEnd({ ok: false, failedIndex: index, interrupted: false });
+    const failure = await failureAt(opts, index, opts.steps[index], c.kind, c.message, undefined, finalizer);
+    if (err instanceof ExecutionDeadlineError && failure.kind !== "page-closed") failure.retryBlocked = true;
+    await finalizeObserver(() => obs?.onRunEnd({ ok: false, failedIndex: index, interrupted: false }));
     return fail(failure);
   }
   opts.refs.clear();
@@ -343,7 +387,7 @@ async function runSteps(opts: BatchOptions, dialogs: DialogGuard | undefined): P
   const last = results[results.length - 1];
   if (late.length && last) last.error = [last.error, ...late].filter(Boolean).join("；");
 
-  await obs?.onRunEnd({ ok: true, interrupted: false });
-  return { ok: true, results, vars: ctx.vars, snapshot: final.text, capturedSteps, artifacts: ctx.artifacts ?? [], refLabels: final.refLabels,
+  await finalizeObserver(() => obs?.onRunEnd({ ok: true, interrupted: false }));
+  return { ok: true, results, vars: committedVars, snapshot: final.text, capturedSteps, artifacts: committedArtifacts, refLabels: final.refLabels,
     ...(variableRedactions.length ? { variableRedactions } : {}) };
 }

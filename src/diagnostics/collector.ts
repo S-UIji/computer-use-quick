@@ -1,5 +1,6 @@
 import type { PageHandle } from "../session/browser.js";
 import { withOverlayHidden } from "../watch/overlay.js";
+import { executionCheckpoint } from "../executor/deadline.js";
 import {
   Favicon404Filter, type Favicon404Evidence, type NetworkLogEntry,
   type DiagnosticRequest, type DiagnosticResponse
@@ -19,6 +20,7 @@ function push<T>(buf: T[], item: T): void {
 export class DiagnosticsCollector {
   /** 每个页面只挂一次监听，重复 attach 复用实例（重复挂会导致同一条报错被记多份） */
   private static instances = new WeakMap<PageHandle, DiagnosticsCollector>();
+  private static initializing = new WeakMap<PageHandle, Promise<DiagnosticsCollector>>();
 
   private consoleBuf: Array<{ text: string; favicon?: Favicon404Evidence }> = [];
   private networkBuf: string[] = [];
@@ -30,11 +32,23 @@ export class DiagnosticsCollector {
     const existing = DiagnosticsCollector.instances.get(handle);
     if (existing) return existing;
 
-    const c = new DiagnosticsCollector(handle);
-    DiagnosticsCollector.instances.set(handle, c);
+    const pending = DiagnosticsCollector.initializing.get(handle);
+    if (pending) return pending;
+    const work = DiagnosticsCollector.initialize(handle);
+    DiagnosticsCollector.initializing.set(handle, work);
+    try { return await work; }
+    finally {
+      if (DiagnosticsCollector.initializing.get(handle) === work) DiagnosticsCollector.initializing.delete(handle);
+    }
+  }
 
+  private static async initialize(handle: PageHandle): Promise<DiagnosticsCollector> {
+    const c = new DiagnosticsCollector(handle);
+    executionCheckpoint();
     await handle.cdp.send("Network.enable");
+    executionCheckpoint();
     await handle.cdp.send("Log.enable");
+    executionCheckpoint();
 
     handle.cdp.on("Runtime.consoleAPICalled", (e: {
       type: string;
@@ -66,6 +80,7 @@ export class DiagnosticsCollector {
       push(c.networkBuf, `FAILED ${e.errorText} (req ${e.requestId})`);
     });
 
+    DiagnosticsCollector.instances.set(handle, c);
     return c;
   }
 

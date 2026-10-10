@@ -253,7 +253,7 @@ describe("后台输入生命周期", () => {
     expect(await visible(user)).toBe("hidden"); expect(await target.page.$eval("#user", n => (n as HTMLInputElement).value)).toBe("fallback");
   });
 
-  it("未知开启错误不切前台或执行输入，失败不会毒化队列", async () => {
+  it("未知开启及恢复错误隔离同页动作，显式重连核实后可继续", async () => {
     const send = target.cdp.send.bind(target.cdp);
     const spy = vi.spyOn(target.cdp, "send").mockImplementation(((method: string, params: any) => {
       if (method === "Emulation.setFocusEmulationEnabled") throw new Error("r14-enable-unexpected");
@@ -263,7 +263,18 @@ describe("后台输入生命周期", () => {
     expect(r.ok).toBe(false); expect(r.failure?.message).toContain("r14-enable-unexpected");
     expect(await target.page.$eval("#user", n => (n as HTMLInputElement).value)).toBe(""); expect(await visible(user)).toBe("visible");
     spy.mockRestore();
-    expect((await batch([{ action: "fill", target: css("#user"), value: "next" }])).ok).toBe(true);
+    const blocked = await batch([{ action: "fill", target: css("#user"), value: "next" }]);
+    expect(blocked.ok).toBe(false); expect(blocked.failure?.retryBlocked).toBe(true);
+    expect(await target.page.$eval("#user", n => (n as HTMLInputElement).value)).toBe("");
+    const reconnected = await BrowserSession.connect(inject("browserURL"));
+    try {
+      const fresh = await reconnected.getPage(target.pageId);
+      await fresh.cdp.send("Emulation.setFocusEmulationEnabled", { enabled: false });
+      const next = await runBatch({ ...(await ctx(fresh)), collector: await DiagnosticsCollector.attach(fresh),
+        steps: [{ action: "fill", target: css("#user"), value: "next" }], captureDescriptors: false });
+      expect(next.ok).toBe(true);
+      expect(await fresh.page.$eval("#user", n => (n as HTMLInputElement).value)).toBe("next");
+    } finally { await reconnected.close(); }
   });
 
   it("成功输入恢复失败时停止后续步骤，说明副作用可能已完成", async () => {
@@ -276,6 +287,9 @@ describe("后台输入生命周期", () => {
     expect(r.ok).toBe(false); expect(r.failure?.kind).toBe("action-failed"); expect(r.failure?.message).toContain("可能已完成");
     expect(r.results).toHaveLength(1); expect(await target.page.$eval("#user", n => (n as HTMLInputElement).value)).toBe("written");
     expect(await target.page.$eval("#result", n => n.textContent)).toBe(""); expect(await visible(user)).toBe("visible");
+    const blocked = await batch([{ action: "click", target: css("#submit") }]);
+    expect(blocked.ok).toBe(false); expect(blocked.failure?.retryBlocked).toBe(true);
+    expect(await target.page.$eval("#result", n => n.textContent)).toBe("");
   });
 
   it("主动作与恢复都失败时保留原始定位失败和恢复提示", async () => {

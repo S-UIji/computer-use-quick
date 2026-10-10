@@ -5,6 +5,7 @@ import { NetworkTracker, waitStable, type StabilityOptions } from "../waiter/sta
 import { waitFor } from "../waiter/explicit.js";
 import { withInputFocus, type InputFocusWarning } from "../session/inputFocus.js";
 import type { InputGate } from "./observer.js";
+import { assertExecutionReady, executionCheckpoint, executionSleep } from "./deadline.js";
 
 export interface ActionContext {
   handle: PageHandle;
@@ -175,6 +176,8 @@ async function readProperty(
 const INPUT_ACTIONS = new Set<Step["action"]>(["click", "fill", "select", "press", "hover", "scroll"]);
 
 export async function runAction(ctx: ActionContext, step: Step): Promise<void> {
+  executionCheckpoint();
+  assertExecutionReady(ctx.handle);
   if (INPUT_ACTIONS.has(step.action)) {
     return withInputFocus(ctx.handle, () => runActionBody(ctx, step), ctx.onInputWarning,
       step.action === "scroll" && !step.target);
@@ -193,7 +196,7 @@ async function runActionBody(ctx: ActionContext, step: Step): Promise<void> {
         errorText?: string;
       };
       if (errorText) throw new Error(`导航失败：${errorText}（${step.url}）`);
-      await new Promise((r) => setTimeout(r, 100));
+      await executionSleep(100);
       break;
     }
 
@@ -269,7 +272,7 @@ async function runActionBody(ctx: ActionContext, step: Step): Promise<void> {
     }
 
     case "sleep": {
-      await new Promise((r) => setTimeout(r, step.ms));
+      await executionSleep(step.ms);
       return;
     }
 

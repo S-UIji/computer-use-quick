@@ -3,18 +3,18 @@ import type { StepObserver } from "../executor/observer.js";
 import type {
   FailureContext, FailureKind, HealOutcome, RunRecord, Step, Trace
 } from "../types.js";
+import { validateStepTimeoutMs } from "../executor/deadline.js";
 import { runBatch } from "../executor/batch.js";
 import { inspectVariables, MissingVariablesError } from "../executor/variables.js";
-import { createVariableRedactor, redactVariableFailure } from "../report/variablePrivacy.js";
-import { NetworkTracker } from "../waiter/stability.js";
-import { DiagnosticsCollector } from "../diagnostics/collector.js";
-import { replayTrace, pageClosedRecord } from "./replay.js";
-import { PageClosedError } from "../session/pageErrors.js";
+import { createVariableRedactor, redactVariableFailure, redactVariableRecord } from "../report/variablePrivacy.js";
+import type { NetworkTracker } from "../waiter/stability.js";
+import type { DiagnosticsCollector } from "../diagnostics/collector.js";
+import { replayTrace, preparationFailureRecord, prepareExecution } from "./replay.js";
 import { failureUrlNotice } from "../session/pageUrl.js";
 import { interruptionRecovery } from "../report/interruptionRecovery.js";
 import { atomicWriteTrace, appendHealRecord, assertNoSecrets, loadTraceSnapshot, TraceChangedError } from "./store.js";
 import { buildRepairPlan, type RepairPlan, type TraceRepair } from "./repairPlan.js";
-import { applyAuth, type AuthState } from "../session/auth.js";
+import type { AuthState } from "../session/auth.js";
 
 /** 可自愈的失败类型。assert-failed 不在列：断言失败可能是被测系统真缺陷，自动改期望等于掩盖 bug */
 export const HEALABLE_KINDS: ReadonlySet<FailureKind> = new Set([
@@ -112,6 +112,7 @@ export interface RunHealOptions {
   vars: Record<string, string>;
   environmentNames?: ReadonlySet<string>;
   dryRun: boolean;
+  stepTimeoutMs?: number;
   /** 认证态：验证门 Context 与正式回放一致注入（登录态 trace 否则必挂） */
   auth?: AuthState;
   /** 视觉基线根目录（测试指向临时目录；验证门与正式回放共用同一套基线） */
@@ -130,6 +131,7 @@ export interface RunMultiHealOptions {
   vars: Record<string, string>;
   environmentNames?: ReadonlySet<string>;
   dryRun: boolean;
+  stepTimeoutMs?: number;
   expectedFingerprint?: string;
   auth?: AuthState;
   baselineRoot?: string;
@@ -143,6 +145,7 @@ export type PlannedHealOutcome =
 
 /** 单点先捕获稳定步骤，再与多点提交共用完整验证和一次写回。 */
 export async function runHeal(opts: RunHealOptions): Promise<PlannedHealOutcome> {
+  validateStepTimeoutMs(opts.stepTimeoutMs);
   const candidate = buildHealedTrace(opts.trace, opts.stepIndex, opts.demoSteps);
   const demoOrigins = inspectVariables(opts.demoSteps, opts.vars, opts.environmentNames).environmentUsed;
 
@@ -155,7 +158,7 @@ export async function runHeal(opts: RunHealOptions): Promise<PlannedHealOutcome>
   const demo = await runBatch({
     handle: opts.handle, tracker: opts.tracker, collector: opts.collector,
     refs: opts.refs, refLabels: opts.refLabels, vars: opts.vars, steps: opts.demoSteps, environmentNames: opts.environmentNames,
-    captureDescriptors: true, observer: opts.demoObserver
+    captureDescriptors: true, observer: opts.demoObserver, stepTimeoutMs: opts.stepTimeoutMs
   });
   if (!demo.ok) {
     return { status: "demo-failed", stepIndex: opts.stepIndex, failure: redactVariableFailure(demo.failure!, createVariableRedactor(opts.vars, demoOrigins, demo.variableRedactions)) };
@@ -175,6 +178,7 @@ export async function runHeal(opts: RunHealOptions): Promise<PlannedHealOutcome>
 
 /** 稳定步骤直接构造候选；只在独立 Context 验证全绿后提交整条 trace。 */
 export async function runMultiHeal(opts: RunMultiHealOptions): Promise<PlannedHealOutcome> {
+  validateStepTimeoutMs(opts.stepTimeoutMs);
   const plan = buildRepairPlan(opts.trace, opts.repairs);
   const healed = plan.trace;
   const { missing } = inspectVariables(healed.steps, opts.vars);
@@ -187,19 +191,20 @@ export async function runMultiHeal(opts: RunMultiHealOptions): Promise<PlannedHe
   try {
     resource = await opts.session.newIsolatedPage({ index: 1, of: 2 });
     const vHandle = resource.handle;
-    const vTracker = await NetworkTracker.attach(vHandle);
-    const vCollector = await DiagnosticsCollector.attach(vHandle);
-    if (opts.auth) await applyAuth(vHandle, opts.auth);
+    const { tracker: vTracker, collector: vCollector } = await prepareExecution(vHandle, opts.auth);
     validation = await replayTrace({
       handle: vHandle, tracker: vTracker, collector: vCollector,
-      trace: healed, vars: opts.vars, environmentNames: opts.environmentNames,
+      trace: healed, vars: opts.vars, environmentNames: opts.environmentNames, stepTimeoutMs: opts.stepTimeoutMs,
       visual: { traceName: opts.trace.name, baselineRoot: opts.baselineRoot },
       observer: opts.validationObserverFor?.(vHandle)
     });
   } catch (err) {
-    if (!(err instanceof PageClosedError) && !resource?.handle.page.isClosed()) throw err;
-    const message = err instanceof PageClosedError ? err.message : new PageClosedError(resource!.handle.pageId).message;
-    validation = pageClosedRecord(healed, message, validationStarted);
+    const record = preparationFailureRecord(healed, err, validationStarted, resource?.handle);
+    if (!record) throw err;
+    const origins = inspectVariables(healed.steps, opts.vars, opts.environmentNames).environmentUsed;
+    validation = redactVariableRecord(record, createVariableRedactor(opts.vars, [
+      ...origins, ...Object.keys(opts.vars).filter(name => !opts.environmentNames?.has(name))
+    ]));
   } finally {
     await resource?.release();
   }

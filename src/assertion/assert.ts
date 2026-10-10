@@ -7,6 +7,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { baselineHash, decodePng, diffPng, encodePng } from "../perception/pngDiff.js";
 import { withOverlayHidden } from "../watch/overlay.js";
+import { executionCheckpoint } from "../executor/deadline.js";
 
 export class AssertionFailure extends Error {
   constructor(message: string, public actual: string, public expected: string) {
@@ -65,20 +66,26 @@ async function runScreenshotMatch(
       format: "png", ...(clip ? { clip } : {})
     })) as { data: string }
   );
+  executionCheckpoint();
   const actualBuf = Buffer.from(data, "base64");
 
   await mkdir(dir, { recursive: true });
+  executionCheckpoint();
   const baselineExists = existsSync(baselinePath);
   if (visual.updateBaselines || !baselineExists) {
+    executionCheckpoint();
     await writeFile(baselinePath, actualBuf);
+    executionCheckpoint();
     return visual.updateBaselines && baselineExists ? "基线已更新" : "基线已创建";
   }
 
   const expectedBuf = await readFile(baselinePath);
+  executionCheckpoint();
   const threshold = step.threshold ?? 0.001;
   const { ratio, exceeded, diff, sizeMismatch } = diffPng(
     decodePng(actualBuf), decodePng(expectedBuf), { threshold }
   );
+  executionCheckpoint();
   if (!exceeded) return undefined;
 
   const base = `screenshot-${step.fullPage ? "full" : "el"}-${hash}`;

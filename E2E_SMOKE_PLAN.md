@@ -291,6 +291,29 @@ node scripts/e2e-smoke.mjs
 
 证据：.scratch/r17-final-full.log、r17-cached-red.log、r17-cached-green.log、r17-cached-regressions.log、r17-title-complete-green.log、r17-smoke.log、r17-smoke-wrapper.log、r17-main-spec-validation-final.log；.scratch/r17-evidence/after-5/ 与 after-6/ 的 evidence.json、原始 CDP/stdio 和截图。详细报告：docs/r17-tool-feedback-fix-2026-10-09.md；剩余清单：docs/remaining-work-2026-10-09.md。
 
+## 步骤截止时间与初始化隔离验收（2026-10-10）
+
+1. 在整步预算内覆盖观察、定位固化、输入排队、动作、稳定等待、焦点恢复与步结算；迟到命令、变量、产物和进度不能污染已返回失败。
+2. 用真实 SDK 验证 batch/replay/suite/heal 的 stepTimeoutMs、错误预检、慢放索引、零后续提交、不可自动重试/自愈，以及普通长用例按步成功。
+3. 外部连接持有冷页 alert，首次/未缓存目标和列表保持可用；真正目标初始化、迟到创建/选页/布局、重连及自建资源清理均有界。
+4. 准备、最终快照、失败诊断、焦点探针和截图挂起必须保留主错误、已知地址、风险标记；恢复未知隔离同页动作，其他页继续可用。
+5. 后台 role/name 查询保留单次原 query，再做同作用域 partial AX 只读更新；不激活用户标签、不改三个匹配的歧义语义，取消后不追加查询。
+6. 截止后的视觉基线写入和 suite 成功通知须停止；普通视觉失败仍归档 actual/expected/diff 三图。采集器只在完整初始化后发布，并发与恢复事件不丢失。
+
+验收结果：
+
+- 最后完整 npm test：97文件 / 950测试全通过，退出0，445.29s，较基线增加108项。
+- 冻结源码及最后 AX 补丁均经独立复审，无剩余 Critical/Important/Minor。所有临时 waiter 诊断已移除，原断言与等待预算保持。
+- 两轮最新有头与两轮 headless 各 28/28 检查、15 次真实 SDK 调用，总112检查/60调用。55份编译 JS 哈希全部相同，aggregate SHA256=89a307ece7a149a16106683c36c35ab83503db66da66a4d6b5c7114c18737efb。
+- 四轮 renderer 死循环前首个真实 POST 各一次，后续 POST=0，工具墙钟3228/3233/3221/3237ms（步骤预算1000ms，含有界收尾）。同页新动作被拒绝，另一来源页DOM仍可读；人工重启专属Chrome、新连接snapshot后只执行一次新的有意提交。
+- 有头条件：Chrome154.0.8037.98，专属干净profile，离屏 normal 2100,100,1100×800；冷弹窗场景核对原可见性不变，普通后台输入和AX查询核对用户页visible；主代理查看两轮最终截图。
+- 每轮4个有意POST分别为正常CSS输入、后台role输入、卡死前首提交和人工恢复后提交。15工具调用与实际协议/进度、HTTP请求、截图、清理记录全部保留，Context最终0，专属进程/profile均清理。
+- 既有headless自愈闭环两轮通过：初次1成功/1失败→heal→复跑2成功/0失败，终判2485/2580ms，E2E_SMOKE_RESULT ok=2 failed=0 rounds=2，PID/profile/ci-env清理核验。
+- 初始两次全量、QA前置条件及Runtime.terminateExecution恢复假设失败均保留。第三次全量950正式测试全部通过，但备份.test.ts误被扫描使suite退出1；备份改非测试扩展并验证内容哈希后，最后完整重跑独立通过。
+- 已发CDP/文件写入不能保证撤回；任意自定义观察者的外部IO与同步CPU无法强制抢占，期限结算仍阻止后续命令。未知焦点须显式恢复/新连接核实，断连后的资源清理无法确认会告警。其他应用OS焦点、Claude真实UI、旧约63秒现场和真实模型恢复仍未验。
+
+证据：.scratch/deadline-full-delivery.log、deadline-final-build-ax.log、deadline-waiter-root-cause.md、deadline-waiter-first-four-green.log、deadline-ax-scoped-green.log、deadline-review-visual-verified.log、deadline-core-last-green.log、deadline-smoke.log、deadline-smoke-wrapper.log；.scratch/deadline-evidence/四个final轮的evidence.json、final-summary.json和本地截图。完整报告：docs/execution-deadlines-fix-2026-10-10.md；剩余清单：docs/remaining-work-2026-10-10.md。
+
 ## 每次修复的验收门槛
 
 - 相关单元/集成测试全绿。
