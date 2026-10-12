@@ -349,3 +349,15 @@ node scripts/e2e-smoke.mjs
 - 当前版本该场景未复现约63秒，不宣称历史根因已修复或历史有头模式已独立证实。现场验证5→4项：Claude实际UI、其他应用OS焦点、真实LLM恢复、R16一次Target.createTarget失败原因。
 
 证据：`.scratch/fill-latency-final-2026-10-12/acceptance.json`、`aggregate.json`、`cleanup-audit.json`、`runner.executed.mjs`、`historical/`及各轮原始run-record；报告：`docs/fill-latency-verification-2026-10-12.md`；最新清单：`docs/remaining-work-2026-10-12.md`。
+
+## R16页面创建生命周期复测（2026-10-12）
+
+- 原after-5第二proxy场景首先出现Target.createTarget: Failed to open a new tab（0页面/0POST/0注入），之后才记录Session closed。历史缺少退出时序，不能把最终cleanup exit0当成浏览器提前退出的证明。
+- 当前Chrome154两轮完整有头场景各51/51；定向两轮有头及两轮无头各12周期，共48周期。每周期新MCP连接；有头复验focus-reset保护与自然timeout重试，无头复验三并发成功和timeout重试，语义分别记录。
+- 正式6轮共314项检查，250次唯一隔离页面创建、250次对应Context释放全部成功，所有target均销毁；194次POST限于临时内存SUT。每周期Context回零、默认页可用，六轮清理前均无浏览器断连。全部专属PID/profile已清理。
+- 透传CDP日志按连接/session/id逐一配对，创建/释放无失败或无响应。128条detach的No session with given id均有此前同session已拆除事件，不宣称CDP零错误。旧proxy汇总跨连接不作权威计数。
+- after-1旧截图坏输入预期与R17提前校验不符，更新两个预期后重跑。after-cycles-headed-1记录人工键盘介入与默认页关闭，用户确认操作或关闭测试窗口；该轮失败保留、不计通过，补两轮有头验证。两类失败均不冒充历史根因。
+- 55份编译JS与21425b4交付构建一致，产品源码及测试无变更；25份主规范严格校验通过。未重复上一产品交付101文件/983项全量测试。
+- R16当前配置复测完成，历史单次原因仍未知。剩余真实环境验收4→3：Claude实际UI进度、跨应用OS焦点、真实LLM介入恢复。
+
+证据：`.scratch/target-lifecycle-2026-10-12/acceptance.json`、`historical/`、`runner-hashes.json`及各轮`lifecycle.jsonl`/`evidence.json`；报告：`docs/target-lifecycle-verification-2026-10-12.md`；最新清单：`docs/remaining-work-2026-10-12.md`。
