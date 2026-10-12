@@ -1,7 +1,9 @@
 # computer-use-quick 全量端到端冒烟计划
 
-首次执行：2026-09-30；状态更新：2026-10-10
+首次执行：2026-09-30；状态更新：2026-10-12
 目标：用真实有头 Chrome、真实 MCP stdio 客户端和旁路“用户”连接，验证从探索到回放、自愈、并发、观察模式和浏览器生命周期的完整链路，并把模型/用户实际会遇到的不舒服之处记录成可修复的问题。
+
+2026-10-12更正：本文历史条目中“外部约63秒”应为临时订单SUT的双并发首次填写；当前版本四轮复测已完成，历史根因仍未知，详见末尾验收。
 
 ## 执行原则
 
@@ -337,3 +339,13 @@ node scripts/e2e-smoke.mjs
 - 有头场景必须检查截图和窗口边界；headless 场景必须再跑一次，确保观察模式改动没有污染 CI。
 - 所有结果可由 `log.md`、截图和 `SUITE_RESULT` 收尾行复核。
 
+## 历史约63秒并行填写复测（2026-10-12）
+
+- 从1092份原始run-record定位两条首次fill：62692/62694ms，整条各65953ms。同批失败trace指向127.0.0.1:55503临时订单SUT，11步/-r2/并发2与scripts/e2e-smoke.mjs吻合；该脚本自23dead8以来无diff。此前“外部3040”来源分类更正，旧原始记录保留。
+- 使用旧CI最小Chrome参数，随机自有端口和profile，Puppeteer仅connect；两轮有头两轮无头，每轮原脚本内部仍两轮初跑→heal→双并发复跑。实际dist调用链确认stepTimeoutMs=90000，避免默认30秒期限掩盖旧延迟。
+- 最终8组pair/16条trace/176步全部成功。首次fill有头19–64ms、无头11–52ms；整条run-record.durationMs有头2100–2283ms、无头2003–2233ms。此口径不混同suite展示时间或driver全流程墙钟。
+- 正式四轮退出0、stderr空，Chrome/MCP进程与profile均退出/删除，DevTools监听0，主ci-env不存在。55份编译JS与21425b4交付一致；现有规范25/25严格校验通过。产品源码和测试无改动，未重复上一交付101文件/983项全量测试。
+- 通用Puppeteer启动初探因含防后台节流参数不计正式轮；最小参数首次运行测试成功但清理EPERM也未计正式轮。失败原件及人工核对清理记录保留；最终脚本分离各项清理并有界重试自有profile，四轮清理及逐条结果经独立复审通过。
+- 当前版本该场景未复现约63秒，不宣称历史根因已修复或历史有头模式已独立证实。现场验证5→4项：Claude实际UI、其他应用OS焦点、真实LLM恢复、R16一次Target.createTarget失败原因。
+
+证据：`.scratch/fill-latency-final-2026-10-12/acceptance.json`、`aggregate.json`、`cleanup-audit.json`、`runner.executed.mjs`、`historical/`及各轮原始run-record；报告：`docs/fill-latency-verification-2026-10-12.md`；最新清单：`docs/remaining-work-2026-10-12.md`。
